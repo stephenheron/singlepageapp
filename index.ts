@@ -76,9 +76,86 @@ ${links || "<li><em>No sites found in ./sites</em></li>"}
   });
 }
 
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** Turn an arbitrary string into a safe subdomain label. */
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/** First free name: `base`, else `base-1`, `base-2`, ... */
+async function uniqueSiteName(base: string): Promise<string> {
+  let existing = new Set<string>();
+  try {
+    const dirents = await readdir(SITES_DIR, { withFileTypes: true });
+    existing = new Set(dirents.filter((d) => d.isDirectory()).map((d) => d.name));
+  } catch {
+    // sites dir missing — nothing exists yet
+  }
+  if (!existing.has(base)) return base;
+  let n = 1;
+  while (existing.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+
+function starterHtml(name: string): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${name}</title>
+  </head>
+  <body>
+    <h1>${name}</h1>
+    <p>New site created by <code>singlepage init</code>.</p>
+  </body>
+</html>
+`;
+}
+
+/** Management API (host-agnostic; mounted under /api/). */
+async function handleApi(req: Request, url: URL): Promise<Response> {
+  if (req.method === "POST" && url.pathname === "/api/sites") {
+    let body: { name?: unknown };
+    try {
+      body = (await req.json()) as { name?: unknown };
+    } catch {
+      return json({ error: "invalid JSON body" }, 400);
+    }
+    const base = slugify(String(body?.name ?? ""));
+    if (!base) return json({ error: "a valid 'name' is required" }, 400);
+
+    const name = await uniqueSiteName(base);
+    // Bun.write creates parent directories as needed.
+    await Bun.write(join(SITES_DIR, name, "public", "index.html"), starterHtml(name));
+
+    return json(
+      { name, url: `http://${name}.${BASE_DOMAIN}:${PORT}/` },
+      201,
+    );
+  }
+  return json({ error: "not found" }, 404);
+}
+
 const server = Bun.serve({
   port: PORT,
   async fetch(req) {
+    const url = new URL(req.url);
+
+    // Management API — handled before host-based routing.
+    if (url.pathname.startsWith("/api/")) return handleApi(req, url);
+
     const site = siteFromHost(req.headers.get("host"));
 
     // No subdomain -> apex listing page (or an unknown host).
@@ -88,7 +165,7 @@ const server = Bun.serve({
       return new Response("Unknown host", { status: 404 });
     }
 
-    const { pathname } = new URL(req.url);
+    const { pathname } = url;
 
     // Reserved route: the shared injected client, available on every subdomain.
     if (pathname === INJECT_PATH) {
