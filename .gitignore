@@ -10,6 +10,9 @@ out
 dist
 *.tgz
 
+# compiled standalone CLI binary (built via `bun run build:cli`)
+/singlepage
+
 # code coverage
 coverage
 *.lcov
