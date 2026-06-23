@@ -1,5 +1,5 @@
 import { join, resolve, sep } from "node:path";
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 
 /**
  * Subdomain-routed static file server.
@@ -124,6 +124,26 @@ function starterHtml(name: string): string {
 `;
 }
 
+// Top-level dirs (plus singlepage.json) the upload API is allowed to write.
+const WRITABLE_ROOTS = ["public/", "server/", "cron/"];
+
+/**
+ * Resolve a site-relative upload path to an absolute path inside the site dir.
+ * Restricted to the writable allow-list and guarded against traversal escapes.
+ * Returns null if the path is disallowed or escapes the site directory.
+ */
+function resolveSiteFile(name: string, relpath: string): string | null {
+  const rel = relpath.replace(/^\/+/, "");
+  const allowed =
+    rel === "singlepage.json" || WRITABLE_ROOTS.some((r) => rel.startsWith(r));
+  if (!allowed) return null;
+
+  const siteRoot = join(SITES_DIR, name);
+  const abs = resolve(siteRoot, rel);
+  if (abs !== siteRoot && !abs.startsWith(siteRoot + sep)) return null;
+  return abs;
+}
+
 /** Management API (host-agnostic; mounted under /api/). */
 async function handleApi(req: Request, url: URL): Promise<Response> {
   if (req.method === "POST" && url.pathname === "/api/sites") {
@@ -145,6 +165,25 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       201,
     );
   }
+
+  // File transfer: PUT/DELETE /api/sites/<name>/files?path=<relpath>
+  const fileMatch = url.pathname.match(/^\/api\/sites\/([^/]+)\/files$/);
+  if (fileMatch && (req.method === "PUT" || req.method === "DELETE")) {
+    const name = decodeURIComponent(fileMatch[1]!);
+    const relpath = url.searchParams.get("path") ?? "";
+    if (!relpath) return json({ error: "'path' query param is required" }, 400);
+
+    const abs = resolveSiteFile(name, relpath);
+    if (!abs) return json({ error: "path not allowed" }, 400);
+
+    if (req.method === "PUT") {
+      await Bun.write(abs, await req.arrayBuffer()); // creates parent dirs
+      return json({ ok: true, path: relpath });
+    }
+    await rm(abs, { force: true });
+    return json({ ok: true, path: relpath, deleted: true });
+  }
+
   return json({ error: "not found" }, 404);
 }
 
