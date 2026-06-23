@@ -6,6 +6,17 @@ import { watch as fsWatch } from "node:fs";
 const CONFIG = "singlepage.json";
 const SCAFFOLD_DIRS = ["public", "server", "cron"];
 
+// Required shared secret, sent as a bearer token on every API request.
+const TOKEN = process.env.SINGLEPAGE_TOKEN;
+const authHeaders = (): Record<string, string> => ({ authorization: `Bearer ${TOKEN}` });
+
+function requireToken(): void {
+  if (!TOKEN) {
+    console.error("SINGLEPAGE_TOKEN is required. Set it (e.g. in a .env file) and retry.");
+    process.exit(1);
+  }
+}
+
 // `watch` syncs these dirs plus the config file (server needs cron config).
 const SYNC_DIRS = SCAFFOLD_DIRS;
 const EXTRA_FILES = [CONFIG];
@@ -18,6 +29,7 @@ type Config = { endpoint: string; site: string };
 // --- init ------------------------------------------------------------------
 
 async function init() {
+  requireToken();
   // Reuse a previously saved endpoint as the default, if present.
   let prev: { endpoint?: string } = {};
   try {
@@ -40,7 +52,7 @@ async function init() {
   try {
     res = await fetch(`${endpoint}/api/sites`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...authHeaders() },
       body: JSON.stringify({ name: dirName }),
     });
   } catch (err) {
@@ -48,6 +60,10 @@ async function init() {
     process.exit(1);
   }
 
+  if (res.status === 401) {
+    console.error("Unauthorized — set SINGLEPAGE_TOKEN to match the server's token.");
+    process.exit(1);
+  }
   if (!res.ok) {
     console.error(`Server error ${res.status}: ${await res.text()}`);
     process.exit(1);
@@ -109,6 +125,7 @@ async function uploadPath(cfg: Config, relpath: string): Promise<boolean> {
   try {
     const res = await fetch(fileUrl(cfg, relpath), {
       method: "PUT",
+      headers: authHeaders(),
       body: Bun.file(relpath),
     });
     if (!res.ok) {
@@ -125,7 +142,10 @@ async function uploadPath(cfg: Config, relpath: string): Promise<boolean> {
 
 async function deletePath(cfg: Config, relpath: string): Promise<boolean> {
   try {
-    const res = await fetch(fileUrl(cfg, relpath), { method: "DELETE" });
+    const res = await fetch(fileUrl(cfg, relpath), {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
     if (!res.ok) {
       console.error(`  ✗ delete ${relpath} → ${res.status}`);
       return false;
@@ -165,6 +185,7 @@ async function snapshotFiles(): Promise<Map<string, string>> {
 // --- watch ------------------------------------------------------------------
 
 async function watch() {
+  requireToken();
   const cfg = await loadConfig();
   const sem = makeSemaphore(MAX_CONCURRENT);
 

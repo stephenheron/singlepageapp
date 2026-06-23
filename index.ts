@@ -1,5 +1,6 @@
 import { join, resolve, sep } from "node:path";
 import { readdir, rm } from "node:fs/promises";
+import { timingSafeEqual } from "node:crypto";
 
 /**
  * Subdomain-routed static file server.
@@ -17,6 +18,23 @@ import { readdir, rm } from "node:fs/promises";
 const PORT = Number(process.env.PORT ?? 3000);
 const BASE_DOMAIN = process.env.BASE_DOMAIN ?? "localhost";
 const SITES_DIR = resolve(import.meta.dir, "sites");
+
+// Required shared secret guarding the write API (/api/*). Requests must send
+// `Authorization: Bearer <token>`. The server refuses to start without it.
+const API_TOKEN: string = process.env.SINGLEPAGE_TOKEN ?? "";
+if (!API_TOKEN) {
+  console.error("SINGLEPAGE_TOKEN is required. Set it to a shared secret and restart.");
+  process.exit(1);
+}
+
+/** Constant-time bearer-token check for the management API. */
+function authorized(req: Request): boolean {
+  const header = req.headers.get("authorization") ?? "";
+  const got = header.startsWith("Bearer ") ? header.slice(7) : "";
+  const a = Buffer.from(got);
+  const b = Buffer.from(API_TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 // Shared client script injected into every served HTML page.
 const INJECT_PATH = "/__inject.js"; // reserved URL, served on every subdomain
@@ -207,6 +225,8 @@ function resolveSiteFile(name: string, relpath: string): string | null {
 
 /** Management API (host-agnostic; mounted under /api/). */
 async function handleApi(req: Request, url: URL): Promise<Response> {
+  if (!authorized(req)) return json({ error: "unauthorized" }, 401);
+
   if (req.method === "POST" && url.pathname === "/api/sites") {
     let body: { name?: unknown };
     try {
