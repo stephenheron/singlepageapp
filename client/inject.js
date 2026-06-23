@@ -16,6 +16,35 @@ export async function fetchJSON(url, opts) {
 // Which site is this? (subdomain label, e.g. "test-site")
 const site = location.hostname.split(".")[0];
 
+// --- key/value store -------------------------------------------------------
+// A per-site store backed by the site's SQLite db, exposed as `window.kv`.
+// Values are any JSON-serializable data. Scoped to this site by origin.
+const kv = {
+  async get(key) {
+    const res = await fetch(`/__kv/${encodeURIComponent(key)}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`kv.get(${key}) → ${res.status}`);
+    return res.json();
+  },
+  async set(key, value) {
+    const res = await fetch(`/__kv/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify(value ?? null),
+    });
+    if (!res.ok) throw new Error(`kv.set(${key}) → ${res.status}`);
+  },
+  async remove(key) {
+    const res = await fetch(`/__kv/${encodeURIComponent(key)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(`kv.remove(${key}) → ${res.status}`);
+  },
+  async keys() {
+    const res = await fetch("/__kv");
+    if (!res.ok) throw new Error(`kv.keys() → ${res.status}`);
+    return res.json();
+  },
+};
+window.kv = kv;
+
 // --- live reload -----------------------------------------------------------
 // Subscribe to the server's per-site SSE stream. When a public file is
 // deployed, the page refreshes (CSS hot-swaps without a full reload).

@@ -1,6 +1,8 @@
 import { join, resolve, sep } from "node:path";
 import { readdir, rm } from "node:fs/promises";
+import { mkdirSync, existsSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
+import { Database } from "bun:sqlite";
 
 /**
  * Subdomain-routed static file server.
@@ -223,6 +225,67 @@ function resolveSiteFile(name: string, relpath: string): string | null {
   return abs;
 }
 
+// Open SQLite connections, one cached per site. The database lives at
+// sites/<name>/data/db.sqlite — outside public/server/cron, so it is never
+// served, synced, or overwritable through the upload API.
+const dbCache = new Map<string, Database>();
+
+function ensureDb(site: string): Database {
+  let db = dbCache.get(site);
+  if (db) return db;
+  const dataDir = join(SITES_DIR, site, "data");
+  mkdirSync(dataDir, { recursive: true });
+  db = new Database(join(dataDir, "db.sqlite"), { create: true });
+  db.exec("PRAGMA journal_mode = WAL;"); // concurrent reads; flushes file to disk
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);",
+  );
+  dbCache.set(site, db);
+  return db;
+}
+
+/**
+ * Per-site key/value store, reachable from the browser at /__kv (host-scoped,
+ * no admin token). Values are opaque text — the client stores JSON.
+ *   GET    /__kv          -> ["key", ...]
+ *   GET    /__kv/<key>    -> stored value (404 if absent)
+ *   PUT    /__kv/<key>    -> store request body as the value
+ *   DELETE /__kv/<key>    -> remove the key
+ */
+async function handleKv(req: Request, site: string, key: string | null): Promise<Response> {
+  if (!existsSync(join(SITES_DIR, site))) {
+    return new Response("Unknown site", { status: 404 });
+  }
+  const db = ensureDb(site);
+
+  if (key === null) {
+    if (req.method !== "GET") return json({ error: "method not allowed" }, 405);
+    const rows = db.query("SELECT key FROM kv ORDER BY key").all() as { key: string }[];
+    return json(rows.map((r) => r.key));
+  }
+
+  if (req.method === "GET") {
+    const row = db.query("SELECT value FROM kv WHERE key = ?").get(key) as
+      | { value: string }
+      | null;
+    if (!row) return new Response("null", { status: 404, headers: { "content-type": "application/json" } });
+    return new Response(row.value, { headers: { "content-type": "application/json" } });
+  }
+  if (req.method === "PUT") {
+    const value = await req.text();
+    db.query(
+      "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    ).run(key, value, Date.now());
+    return json({ ok: true });
+  }
+  if (req.method === "DELETE") {
+    db.query("DELETE FROM kv WHERE key = ?").run(key);
+    return json({ ok: true });
+  }
+  return json({ error: "method not allowed" }, 405);
+}
+
 /** Management API (host-agnostic; mounted under /api/). */
 async function handleApi(req: Request, url: URL): Promise<Response> {
   if (!authorized(req)) return json({ error: "unauthorized" }, 401);
@@ -240,6 +303,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     const name = await uniqueSiteName(base);
     // Bun.write creates parent directories as needed.
     await Bun.write(join(SITES_DIR, name, "public", "index.html"), starterHtml(name));
+    ensureDb(name); // provision the site's SQLite database + kv table
 
     return json(
       { name, url: `http://${name}.${BASE_DOMAIN}:${PORT}/` },
@@ -291,6 +355,13 @@ const server = Bun.serve({
 
     // Reserved route: live-reload event stream for this site.
     if (pathname === RELOAD_PATH) return reloadStream(site);
+
+    // Reserved route: per-site key/value store (host-scoped, browser-accessible).
+    if (pathname === "/__kv" || pathname.startsWith("/__kv/")) {
+      const rawKey = pathname === "/__kv" ? "" : pathname.slice("/__kv/".length);
+      const key = rawKey ? decodeURIComponent(rawKey) : null;
+      return handleKv(req, site, key);
+    }
 
     // Reserved route: the shared injected client, available on every subdomain.
     if (pathname === INJECT_PATH) {
