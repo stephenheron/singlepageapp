@@ -9,6 +9,8 @@ import {
   serveInjectScript,
   serveStatic,
 } from "./sites.ts";
+import { FN_PREFIX, handleServer } from "./server.ts";
+import { startCron } from "./cron.ts";
 
 /**
  * Subdomain-routed static file server. Each <site>.<BASE_DOMAIN> maps to
@@ -48,10 +50,18 @@ const server = Bun.serve({
     // Reserved route: the shared injected client, available on every subdomain.
     if (pathname === INJECT_PATH) return serveInjectScript();
 
+    // Reserved route: per-site server-side function handlers.
+    if (pathname === FN_PREFIX || pathname.startsWith(FN_PREFIX + "/")) {
+      return handleServer(req, site, url);
+    }
+
     // Everything else: a static file from the site's public/ dir.
     return serveStatic(site, pathname);
   },
 });
+
+// Schedule each site's cron jobs from its singlepage.json.
+startCron();
 
 console.log(`Serving sites from ${import.meta.dir}/sites`);
 console.log(`Listening on http://${BASE_DOMAIN}:${server.port}`);

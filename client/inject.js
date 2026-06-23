@@ -60,6 +60,53 @@ export const kv = {
   },
 };
 
+// --- server functions ------------------------------------------------------
+// Call this site's server-side handlers (sites/<site>/server/*.js, mounted at
+// /__fn/*). Import it as a module:
+//   import { fn } from "/__inject.js";
+//   const data = await fn("hello", { query: { name: "sp" } }); // GET /__fn/hello?name=sp
+//   const saved = await fn.post("save", { title: "hi" });       // POST /__fn/save (JSON body)
+// JSON responses are parsed automatically; anything else comes back as text.
+// Non-2xx responses throw an Error carrying the handler's { error } message.
+
+/**
+ * Call a server function by name (the path under server/, without ".js").
+ * @param {string} name e.g. "hello" or "users/list" ("" or "/" → server/index.js)
+ * @param {{ method?: string, query?: Record<string,any>, body?: any, headers?: Record<string,string> }} [opts]
+ */
+export async function fn(name, opts = {}) {
+  const { method = "GET", query, body, headers = {} } = opts;
+  let path = "/__fn/" + String(name).replace(/^\/+/, "");
+  if (query) {
+    const qs = new URLSearchParams(query).toString();
+    if (qs) path += `?${qs}`;
+  }
+
+  const init = { method, headers: { ...headers } };
+  if (body !== undefined) {
+    if (typeof body === "string") {
+      init.body = body;
+    } else {
+      init.body = JSON.stringify(body);
+      init.headers["content-type"] ??= "application/json";
+    }
+  }
+
+  const res = await fetch(path, init);
+  const ct = res.headers.get("content-type") || "";
+  const payload = ct.includes("application/json") ? await res.json() : await res.text();
+  if (!res.ok) {
+    const msg = payload && payload.error ? payload.error : payload || res.statusText;
+    throw new Error(`fn ${name || "index"} → ${res.status}: ${msg}`);
+  }
+  return payload;
+}
+
+/** GET a server function, passing `query` as the query string. */
+fn.get = (name, query) => fn(name, { method: "GET", query });
+/** POST a server function with a JSON (or string) `body`. */
+fn.post = (name, body, opts) => fn(name, { ...opts, method: "POST", body });
+
 // --- event stream ----------------------------------------------------------
 // One per-site SSE connection carries every event type: "change" (live reload)
 // and "kv" (key/value store changes). NOTE on scale: the server pushes ALL of a

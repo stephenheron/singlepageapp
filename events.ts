@@ -1,5 +1,6 @@
 // Per-site event bus over SSE. Browsers open one stream and receive multiple
-// event types: "change" (live reload) and "kv" (key/value store changes).
+// event types: "change" (live reload), "kv" (key/value store changes), and
+// "log" (console output from server/cron code; see appendLog in kv.ts).
 export const EVENTS_PATH = "/__events";
 
 const siteClients = new Map<string, Set<ReadableStreamDefaultController>>();

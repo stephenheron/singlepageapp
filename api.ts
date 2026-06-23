@@ -4,6 +4,19 @@ import { timingSafeEqual } from "node:crypto";
 import { SITES_DIR, BASE_DOMAIN, PORT, json } from "./config.ts";
 import { notifyReloadForPath } from "./events.ts";
 import { ensureDb } from "./kv.ts";
+import { invalidate } from "./sandbox.ts";
+import { rescheduleSite } from "./cron.ts";
+
+/**
+ * Keep the running server in sync with an uploaded/deleted source file: drop any
+ * cached server/cron module so the next run recompiles it, and reschedule cron
+ * when the config itself changes.
+ */
+function onSourceChange(site: string, relpath: string): void {
+  const rel = relpath.replace(/^\/+/, "");
+  if (rel === "singlepage.json") rescheduleSite(site);
+  else if (rel.startsWith("server/") || rel.startsWith("cron/")) invalidate(site, rel);
+}
 
 // Required shared secret guarding the write API (/api/*). Requests must send
 // `Authorization: Bearer <token>`. The server refuses to start without it.
@@ -121,10 +134,12 @@ export async function handleApi(req: Request, url: URL): Promise<Response> {
     if (req.method === "PUT") {
       await Bun.write(abs, await req.arrayBuffer()); // creates parent dirs
       notifyReloadForPath(name, relpath);
+      onSourceChange(name, relpath);
       return json({ ok: true, path: relpath });
     }
     await rm(abs, { force: true });
     notifyReloadForPath(name, relpath);
+    onSourceChange(name, relpath);
     return json({ ok: true, path: relpath, deleted: true });
   }
 

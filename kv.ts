@@ -19,8 +19,77 @@ export function ensureDb(site: string): Database {
   db.exec(
     "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);",
   );
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL);",
+  );
   dbCache.set(site, db);
   return db;
+}
+
+// --- KV helpers --------------------------------------------------------------
+// Synchronous primitives shared by the HTTP handler (handleKv) and the server
+// /cron sandbox. Values are opaque text — callers store JSON. kvSet broadcasts a
+// "kv" SSE event so every open page (and any sandbox writer) stays live.
+
+/** Stored value for a key, or null if absent. */
+export function kvGet(site: string, key: string): string | null {
+  const row = ensureDb(site).query("SELECT value FROM kv WHERE key = ?").get(key) as
+    | { value: string }
+    | null;
+  return row ? row.value : null;
+}
+
+/** Store `value` (opaque text) under `key` and notify open pages. */
+export function kvSet(site: string, key: string, value: string): void {
+  ensureDb(site)
+    .query(
+      "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .run(key, value, Date.now());
+  // Values are JSON from the writer; fall back to the raw text if it isn't valid.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    parsed = value;
+  }
+  broadcast(site, "kv", JSON.stringify({ key, action: "set", value: parsed }));
+}
+
+/** Remove `key` and notify open pages. */
+export function kvRemove(site: string, key: string): void {
+  ensureDb(site).query("DELETE FROM kv WHERE key = ?").run(key);
+  broadcast(site, "kv", JSON.stringify({ key, action: "delete" }));
+}
+
+/** All keys, sorted. */
+export function kvKeys(site: string): string[] {
+  const rows = ensureDb(site).query("SELECT key FROM kv ORDER BY key").all() as {
+    key: string;
+  }[];
+  return rows.map((r) => r.key);
+}
+
+// --- Logs --------------------------------------------------------------------
+
+const LOG_RETENTION = 1000; // keep the most recent N rows per site
+
+/** Persist a log line from server/cron code and broadcast it for live tailing. */
+export function appendLog(site: string, source: string, level: string, message: string): void {
+  const db = ensureDb(site);
+  const ts = Date.now();
+  db.query("INSERT INTO logs (ts, source, level, message) VALUES (?, ?, ?, ?)").run(
+    ts,
+    source,
+    level,
+    message,
+  );
+  // Trim to the retention window so a chatty job can't grow the DB unbounded.
+  db.query(
+    "DELETE FROM logs WHERE id <= (SELECT MAX(id) FROM logs) - ?",
+  ).run(LOG_RETENTION);
+  broadcast(site, "log", JSON.stringify({ ts, source, level, message }));
 }
 
 /**
@@ -35,41 +104,25 @@ export async function handleKv(req: Request, site: string, key: string | null): 
   if (!existsSync(join(SITES_DIR, site))) {
     return new Response("Unknown site", { status: 404 });
   }
-  const db = ensureDb(site);
 
   if (key === null) {
     if (req.method !== "GET") return json({ error: "method not allowed" }, 405);
-    const rows = db.query("SELECT key FROM kv ORDER BY key").all() as { key: string }[];
-    return json(rows.map((r) => r.key));
+    return json(kvKeys(site));
   }
 
   if (req.method === "GET") {
-    const row = db.query("SELECT value FROM kv WHERE key = ?").get(key) as
-      | { value: string }
-      | null;
-    if (!row) return new Response("null", { status: 404, headers: { "content-type": "application/json" } });
-    return new Response(row.value, { headers: { "content-type": "application/json" } });
+    const value = kvGet(site, key);
+    if (value === null) {
+      return new Response("null", { status: 404, headers: { "content-type": "application/json" } });
+    }
+    return new Response(value, { headers: { "content-type": "application/json" } });
   }
   if (req.method === "PUT") {
-    const value = await req.text();
-    db.query(
-      "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-    ).run(key, value, Date.now());
-    // Push to every open page of this site (incl. the writer). Values are JSON
-    // from the client; fall back to the raw text if it isn't valid JSON.
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(value);
-    } catch {
-      parsed = value;
-    }
-    broadcast(site, "kv", JSON.stringify({ key, action: "set", value: parsed }));
+    kvSet(site, key, await req.text());
     return json({ ok: true });
   }
   if (req.method === "DELETE") {
-    db.query("DELETE FROM kv WHERE key = ?").run(key);
-    broadcast(site, "kv", JSON.stringify({ key, action: "delete" }));
+    kvRemove(site, key);
     return json({ ok: true });
   }
   return json({ error: "method not allowed" }, 405);
