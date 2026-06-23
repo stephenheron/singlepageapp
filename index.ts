@@ -43,17 +43,20 @@ const INJECT_PATH = "/__inject.js"; // reserved URL, served on every subdomain
 const INJECT_FILE = resolve(import.meta.dir, "client", "inject.js");
 const INJECT_TAG = `<script type="module" src="${INJECT_PATH}"></script>`;
 
-// Live reload: browsers subscribe to an SSE stream per site; the file-upload
-// API broadcasts a "change" event so open pages refresh on deploy.
-const RELOAD_PATH = "/__reload";
-const reloadClients = new Map<string, Set<ReadableStreamDefaultController>>();
+// Per-site event bus over SSE. Browsers open one stream and receive multiple
+// event types: "change" (live reload) and "kv" (key/value store changes).
+const EVENTS_PATH = "/__events";
+const siteClients = new Map<string, Set<ReadableStreamDefaultController>>();
 const sseEncoder = new TextEncoder();
 
-/** Broadcast a changed browser-path to every open page of a site. */
-function notifyReload(site: string, browserPath: string): void {
-  const set = reloadClients.get(site);
+// NOTE on scale: every event for a site is broadcast to ALL of that site's open
+// browsers; per-key filtering happens client-side. Fine for chat-sized loads,
+// but a high-write site or many keys means redundant traffic. The eventual fix
+// is server-side per-key subscriptions (a client->server subscribe channel).
+function broadcast(site: string, event: string, data: string): void {
+  const set = siteClients.get(site);
   if (!set) return;
-  const msg = sseEncoder.encode(`event: change\ndata: ${browserPath}\n\n`);
+  const msg = sseEncoder.encode(`event: ${event}\ndata: ${data}\n\n`);
   for (const ctrl of set) {
     try {
       ctrl.enqueue(msg);
@@ -67,18 +70,18 @@ function notifyReload(site: string, browserPath: string): void {
 function notifyReloadForPath(site: string, relpath: string): void {
   const prefix = "public/";
   if (!relpath.startsWith(prefix)) return; // server/cron/config don't affect the page
-  notifyReload(site, "/" + relpath.slice(prefix.length));
+  broadcast(site, "change", "/" + relpath.slice(prefix.length));
 }
 
-/** Open SSE stream that registers this browser as a reload subscriber. */
-function reloadStream(site: string): Response {
+/** Open SSE stream that registers this browser as a subscriber for the site. */
+function eventStream(site: string): Response {
   let ctrlRef: ReadableStreamDefaultController | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   const stream = new ReadableStream({
     start(controller) {
       ctrlRef = controller;
-      let set = reloadClients.get(site);
-      if (!set) reloadClients.set(site, (set = new Set()));
+      let set = siteClients.get(site);
+      if (!set) siteClients.set(site, (set = new Set()));
       set.add(controller);
       controller.enqueue(sseEncoder.encode("retry: 2000\n\n")); // reconnect hint
       // Keep intermediaries from dropping an idle connection.
@@ -92,7 +95,7 @@ function reloadStream(site: string): Response {
     },
     cancel() {
       if (heartbeat) clearInterval(heartbeat);
-      if (ctrlRef) reloadClients.get(site)?.delete(ctrlRef);
+      if (ctrlRef) siteClients.get(site)?.delete(ctrlRef);
     },
   });
   return new Response(stream, {
@@ -277,10 +280,20 @@ async function handleKv(req: Request, site: string, key: string | null): Promise
       "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
     ).run(key, value, Date.now());
+    // Push to every open page of this site (incl. the writer). Values are JSON
+    // from the client; fall back to the raw text if it isn't valid JSON.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      parsed = value;
+    }
+    broadcast(site, "kv", JSON.stringify({ key, action: "set", value: parsed }));
     return json({ ok: true });
   }
   if (req.method === "DELETE") {
     db.query("DELETE FROM kv WHERE key = ?").run(key);
+    broadcast(site, "kv", JSON.stringify({ key, action: "delete" }));
     return json({ ok: true });
   }
   return json({ error: "method not allowed" }, 405);
@@ -353,8 +366,8 @@ const server = Bun.serve({
 
     const { pathname } = url;
 
-    // Reserved route: live-reload event stream for this site.
-    if (pathname === RELOAD_PATH) return reloadStream(site);
+    // Reserved route: per-site event stream (live reload + kv changes).
+    if (pathname === EVENTS_PATH) return eventStream(site);
 
     // Reserved route: per-site key/value store (host-scoped, browser-accessible).
     if (pathname === "/__kv" || pathname.startsWith("/__kv/")) {

@@ -17,9 +17,13 @@ export async function fetchJSON(url, opts) {
 const site = location.hostname.split(".")[0];
 
 // --- key/value store -------------------------------------------------------
-// A per-site store backed by the site's SQLite db, exposed as `window.kv`.
+// A per-site store backed by the site's SQLite db. Import it as a module:
+//   import { kv } from "/__inject.js";
 // Values are any JSON-serializable data. Scoped to this site by origin.
-const kv = {
+// Change events arrive over the shared SSE stream (see connectEvents below).
+const kvSubscribers = new Set(); // handlers for live { key, action, value } changes
+
+export const kv = {
   async get(key) {
     const res = await fetch(`/__kv/${encodeURIComponent(key)}`);
     if (res.status === 404) return null;
@@ -42,14 +46,30 @@ const kv = {
     if (!res.ok) throw new Error(`kv.keys() → ${res.status}`);
     return res.json();
   },
+  // Listen for changes to any key. handler({ key, action, value }); action is
+  // "set" (value present) or "delete". Returns an unsubscribe function.
+  subscribe(handler) {
+    kvSubscribers.add(handler);
+    return () => kvSubscribers.delete(handler);
+  },
+  // Convenience: listen for changes to a single key. Returns unsubscribe.
+  on(key, handler) {
+    return kv.subscribe((change) => {
+      if (change.key === key) handler(change);
+    });
+  },
 };
-window.kv = kv;
 
-// --- live reload -----------------------------------------------------------
-// Subscribe to the server's per-site SSE stream. When a public file is
-// deployed, the page refreshes (CSS hot-swaps without a full reload).
-function connectLiveReload() {
-  const es = new EventSource("/__reload"); // auto-reconnects on drop
+// --- event stream ----------------------------------------------------------
+// One per-site SSE connection carries every event type: "change" (live reload)
+// and "kv" (key/value store changes). NOTE on scale: the server pushes ALL of a
+// site's kv changes to every page; kv.on(key) filters here on the client. Fine
+// for chat-sized loads, but won't scale to high write volume or many keys —
+// the future fix is server-side per-key subscriptions.
+function connectEvents() {
+  const es = new EventSource("/__events"); // auto-reconnects on drop
+
+  // Live reload: deploys refresh the page (CSS hot-swaps without a full reload).
   let reloadTimer;
   es.addEventListener("change", (e) => {
     const path = e.data;
@@ -57,6 +77,23 @@ function connectLiveReload() {
     // Coalesce a burst of changes into a single reload.
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(() => location.reload(), 100);
+  });
+
+  // KV changes: fan out to subscribers registered via kv.subscribe / kv.on.
+  es.addEventListener("kv", (e) => {
+    let change;
+    try {
+      change = JSON.parse(e.data); // { key, action, value? }
+    } catch {
+      return;
+    }
+    for (const handler of kvSubscribers) {
+      try {
+        handler(change);
+      } catch (err) {
+        console.error("[inject] kv subscriber threw", err);
+      }
+    }
   });
 }
 
@@ -74,7 +111,7 @@ function hotSwapCss(path) {
   return false;
 }
 
-connectLiveReload();
+connectEvents();
 
 async function init() {
   console.log(`[inject] loaded on "${site}"`);
