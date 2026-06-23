@@ -23,6 +23,67 @@ const INJECT_PATH = "/__inject.js"; // reserved URL, served on every subdomain
 const INJECT_FILE = resolve(import.meta.dir, "client", "inject.js");
 const INJECT_TAG = `<script type="module" src="${INJECT_PATH}"></script>`;
 
+// Live reload: browsers subscribe to an SSE stream per site; the file-upload
+// API broadcasts a "change" event so open pages refresh on deploy.
+const RELOAD_PATH = "/__reload";
+const reloadClients = new Map<string, Set<ReadableStreamDefaultController>>();
+const sseEncoder = new TextEncoder();
+
+/** Broadcast a changed browser-path to every open page of a site. */
+function notifyReload(site: string, browserPath: string): void {
+  const set = reloadClients.get(site);
+  if (!set) return;
+  const msg = sseEncoder.encode(`event: change\ndata: ${browserPath}\n\n`);
+  for (const ctrl of set) {
+    try {
+      ctrl.enqueue(msg);
+    } catch {
+      set.delete(ctrl); // stream already closed
+    }
+  }
+}
+
+/** Map an uploaded relpath to a browser path and notify, if it's a public file. */
+function notifyReloadForPath(site: string, relpath: string): void {
+  const prefix = "public/";
+  if (!relpath.startsWith(prefix)) return; // server/cron/config don't affect the page
+  notifyReload(site, "/" + relpath.slice(prefix.length));
+}
+
+/** Open SSE stream that registers this browser as a reload subscriber. */
+function reloadStream(site: string): Response {
+  let ctrlRef: ReadableStreamDefaultController | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  const stream = new ReadableStream({
+    start(controller) {
+      ctrlRef = controller;
+      let set = reloadClients.get(site);
+      if (!set) reloadClients.set(site, (set = new Set()));
+      set.add(controller);
+      controller.enqueue(sseEncoder.encode("retry: 2000\n\n")); // reconnect hint
+      // Keep intermediaries from dropping an idle connection.
+      heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(sseEncoder.encode(": ping\n\n"));
+        } catch {
+          /* closed; cancel() will clean up */
+        }
+      }, 25000);
+    },
+    cancel() {
+      if (heartbeat) clearInterval(heartbeat);
+      if (ctrlRef) reloadClients.get(site)?.delete(ctrlRef);
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
 /** Extract the site name from a Host header, or null for the apex domain. */
 function siteFromHost(host: string | null): string | null {
   if (!host) return null;
@@ -178,9 +239,11 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
 
     if (req.method === "PUT") {
       await Bun.write(abs, await req.arrayBuffer()); // creates parent dirs
+      notifyReloadForPath(name, relpath);
       return json({ ok: true, path: relpath });
     }
     await rm(abs, { force: true });
+    notifyReloadForPath(name, relpath);
     return json({ ok: true, path: relpath, deleted: true });
   }
 
@@ -205,6 +268,9 @@ const server = Bun.serve({
     }
 
     const { pathname } = url;
+
+    // Reserved route: live-reload event stream for this site.
+    if (pathname === RELOAD_PATH) return reloadStream(site);
 
     // Reserved route: the shared injected client, available on every subdomain.
     if (pathname === INJECT_PATH) {

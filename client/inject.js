@@ -16,6 +16,37 @@ export async function fetchJSON(url, opts) {
 // Which site is this? (subdomain label, e.g. "test-site")
 const site = location.hostname.split(".")[0];
 
+// --- live reload -----------------------------------------------------------
+// Subscribe to the server's per-site SSE stream. When a public file is
+// deployed, the page refreshes (CSS hot-swaps without a full reload).
+function connectLiveReload() {
+  const es = new EventSource("/__reload"); // auto-reconnects on drop
+  let reloadTimer;
+  es.addEventListener("change", (e) => {
+    const path = e.data;
+    if (path.endsWith(".css") && hotSwapCss(path)) return;
+    // Coalesce a burst of changes into a single reload.
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => location.reload(), 100);
+  });
+}
+
+// Re-point a matching <link rel=stylesheet> with a cache-bust. Returns false
+// if no matching stylesheet is linked (caller falls back to a full reload).
+function hotSwapCss(path) {
+  for (const link of document.querySelectorAll('link[rel="stylesheet"]')) {
+    const url = new URL(link.href, location.href);
+    if (url.pathname === path) {
+      url.searchParams.set("_r", String(Date.now()));
+      link.href = url.href;
+      return true;
+    }
+  }
+  return false;
+}
+
+connectLiveReload();
+
 async function init() {
   console.log(`[inject] loaded on "${site}"`);
 
