@@ -1,7 +1,7 @@
 import { test, expect, afterAll } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { isBlockedHost, runModule, invalidate } from "./sandbox.ts";
+import { isBlockedHost, runModule, invalidate, __poolSnapshot } from "./sandbox.ts";
 import { SITES_DIR } from "./config.ts";
 
 const TEST_SITE = "_sandbox_test_site";
@@ -59,6 +59,32 @@ test("invalidate disposes cleanly and the engine stays usable", async () => {
   const second = await runModule(TEST_SITE, "server/ping.js", {}, { deadlineMs: 2000 });
   expect(second.ok).toBe(true); // rebuilt fine -> module not corrupted
   if (second.ok) expect((second.value as any).body).toBe("pong");
+});
+
+// Regression: a handler that kicks off an async host call WITHOUT awaiting it
+// (detached / fire-and-forget) returns before that call settles. The context
+// must NOT go back into the idle pool while that work is in flight — otherwise
+// the next request reuses the same VM and the old request's continuation resumes
+// against the new request's globals/module state (executePendingJobs runs it).
+// We assert the invariant directly: no idle context ever has in-flight refs.
+test("detached async work keeps the context out of the idle pool", async () => {
+  // Fires ctx.fetch but does not await it, then returns immediately. The fetch is
+  // still draining (network RTT >> the sync gap before we snapshot below).
+  await Bun.write(
+    join(SITES_DIR, TEST_SITE, "server", "detached.js"),
+    `export default function (req, ctx) {
+       ctx.fetch("https://example.com").then(() => {}).catch(() => {});
+       return { accepted: true };
+     }`,
+  );
+  const r = await runModule(TEST_SITE, "server/detached.js", {}, { deadlineMs: 3000 });
+  expect(r.ok).toBe(true);
+
+  // The handler has returned but its detached fetch is still in flight. Before the
+  // fix, releaseEntry pushed this context (refs === 1) straight into idle, where the
+  // next request could check it out. It must be parked instead, not idle-reusable.
+  const snap = __poolSnapshot(TEST_SITE, "server/detached.js");
+  expect(snap?.idleInflight ?? 0).toBe(0);
 });
 
 // Concurrent requests to the same handler must run on separate pooled contexts

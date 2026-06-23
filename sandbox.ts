@@ -241,6 +241,31 @@ function disposeIfIdle(entry: Entry): void {
   if (entry.retired && entry.refs === 0) disposeEntry(entry);
 }
 
+/**
+ * Decide the fate of a context that is no longer checked out for a run. Called
+ * when a run releases it AND when each background async call settles, because a
+ * context is reusable only once nothing is touching it (`refs === 0`).
+ *
+ * If `refs > 0`, detached async work (e.g. a fetch the handler kicked off but did
+ * not await) is still in flight — do nothing now and revisit when it settles.
+ * Returning such a context to the idle pool would let the next request check it
+ * out while the old request's continuation can still resume inside the same VM,
+ * clobbering shared globals/module state. Once `refs` reaches 0, reuse it if it
+ * is still healthy, otherwise dispose it.
+ */
+function settleEntry(entry: Entry): void {
+  if (entry.refs > 0) return; // background async still draining; settle on its completion
+  const pool = entry.pool;
+  const reusable = !entry.retired && entry.generation === pool.generation && entry.context.alive;
+  if (reusable) {
+    pool.idle.push(entry);
+    wakeWaiter(pool);
+  } else {
+    entry.retired = true;
+    disposeIfIdle(entry); // refs === 0 here, so this disposes now
+  }
+}
+
 /** Discard every idle context in a pool (e.g. after the source changed). */
 function flushIdle(pool: Pool): void {
   const idle = pool.idle;
@@ -262,6 +287,24 @@ export function invalidate(site: string, relpath: string): void {
   pool.generation++;
   pool.mtimeMs = -1; // force a re-stat on the next acquire
   flushIdle(pool);
+}
+
+/**
+ * Test-only: snapshot a handler's context pool. `idleInflight` counts idle
+ * contexts that still have in-flight refs — which must always be 0, since a
+ * context with detached async work pending is not safe to reuse.
+ */
+export function __poolSnapshot(
+  site: string,
+  relpath: string,
+): { idle: number; live: number; idleInflight: number } | null {
+  const pool = pools.get(poolKey(site, relpath));
+  if (!pool) return null;
+  return {
+    idle: pool.idle.length,
+    live: pool.live,
+    idleInflight: pool.idle.filter((e) => e.refs > 0).length,
+  };
 }
 
 /** Build a fresh context: install host functions, run the prelude, load user code. */
@@ -297,6 +340,37 @@ async function loadEntry(
     hostHandles.push(handle);
   };
 
+  /**
+   * Install an async host function using the deferred-promise model. `impl` takes
+   * the single JSON-string argument and resolves to a JSON string; the wrapper
+   * returns a VM promise the host settles when `impl` finishes. This bakes in the
+   * four invariants every async host call needs: hold a ref across the work, guard
+   * `context.alive`, dispose the result handle, and pump pending jobs to resume the
+   * awaiting VM code. Add new async capabilities here instead of hand-rolling them.
+   */
+  const installAsync = (name: string, impl: (argsJson: string) => Promise<string>) => {
+    install(
+      name,
+      context.newFunction(name, (argsH) => {
+        const argsJson = context.getString(argsH);
+        const deferred = context.newPromise();
+        entry.refs++; // keep the context alive until this call settles
+        impl(argsJson).then((out) => {
+          // The context stays alive while refs > 0, so it is always alive here.
+          if (context.alive) {
+            const h = context.newString(out);
+            deferred.resolve(h);
+            h.dispose();
+            context.runtime.executePendingJobs(); // resume the awaiting VM code
+          }
+          entry.refs--;
+          settleEntry(entry); // last ref out -> reuse if healthy, else dispose
+        });
+        return deferred.handle;
+      }),
+    );
+  };
+
   install(
     "__host_kv_get",
     context.newFunction("__host_kv_get", (keyH) => {
@@ -330,26 +404,7 @@ async function loadEntry(
     }),
   );
   // Async fetch via the deferred-promise model: return a promise the host settles.
-  install(
-    "__host_fetch",
-    context.newFunction("__host_fetch", (argsH) => {
-      const argsJson = context.getString(argsH);
-      const deferred = context.newPromise();
-      entry.refs++; // keep the context alive until this fetch settles
-      hostFetch(argsJson).then((out) => {
-        // The context stays alive while refs > 0, so it is always alive here.
-        if (context.alive) {
-          const h = context.newString(out);
-          deferred.resolve(h);
-          h.dispose();
-          context.runtime.executePendingJobs(); // resume the awaiting VM code
-        }
-        entry.refs--;
-        disposeIfIdle(entry);
-      });
-      return deferred.handle;
-    }),
-  );
+  installAsync("__host_fetch", hostFetch);
 
   // Build the ctx API, then load the user's module and pin its default export.
   // Dispose the eval result — the prelude's last expression is the assignment
@@ -423,19 +478,15 @@ async function acquireEntry(
 
 /** Return a context after a call: reuse it if healthy, otherwise discard it. */
 function releaseEntry(entry: Entry, timedOut: boolean): void {
-  const pool = entry.pool;
-  // A timed-out (or interrupted) run can leave a draining fetch / pending
-  // promise, so that context is not safe to reuse — discard it. Likewise discard
-  // stale (older-generation) or already-dead contexts.
-  const discard =
-    timedOut || entry.retired || entry.generation !== pool.generation || !entry.context.alive;
-  if (discard) {
+  // A timed-out (or interrupted) run can leave a draining fetch / pending promise,
+  // so that context is not safe to reuse — retire it. `settleEntry` then disposes
+  // it (now if refs 0, else once the draining work finishes) and never reuses it.
+  if (timedOut || entry.generation !== entry.pool.generation || !entry.context.alive) {
     entry.retired = true;
-    disposeIfIdle(entry); // disposes now (refs 0) or once a draining fetch finishes
-  } else {
-    pool.idle.push(entry);
-    wakeWaiter(pool);
   }
+  // settleEntry handles the rest: reuse if healthy and fully idle, park if detached
+  // async work is still in flight (refs > 0), otherwise dispose.
+  settleEntry(entry);
 }
 
 // --- Public run API ----------------------------------------------------------
