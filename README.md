@@ -38,12 +38,16 @@ SINGLEPAGE_TOKEN=dev-secret singlepage init   # creates the site, scaffolds dirs
 singlepage watch                              # uploads + live-syncs on change
 ```
 
-`init` calls the server, creates the site, and writes two files:
+`init` calls the server, creates the site, scaffolds the dirs, and writes:
 
 - **`singlepage.json`** — endpoint, site name, and the `cron` map. Synced to the
   server; carries no secrets.
 - **`.singlepage.credentials.json`** — the admin token and this site's **deploy
   key**, gitignored and never synced.
+- **An agent guide** — a frontend-focused guide for AI coding agents, installed as
+  both a Claude skill (`.claude/skills/singlepage/SKILL.md`) and a vendor-neutral
+  `AGENTS.md` block at the project root. Re-running `init` refreshes them (the
+  `AGENTS.md` block is updated in place, leaving any other content untouched).
 
 Then open the URL `init` printed (e.g. `http://my-site.localhost:3000/`). Edit
 files under `public/`, `server/`, or `cron/` and `watch` deploys them; open pages
@@ -53,7 +57,7 @@ live-reload (CSS hot-swaps without a full reload).
 
 | Command | What it does |
 | --- | --- |
-| `singlepage init` | Create a site (admin token), scaffold `public/ server/ cron/`, save config + credentials. |
+| `singlepage init` | Create a site (admin token), scaffold `public/ server/ cron/`, save config + credentials, and install the agent guide (`SKILL.md` + `AGENTS.md`). |
 | `singlepage watch` | Initial upload, then watch `public/ server/ cron/` + `singlepage.json` and sync changes (deploy key). |
 | `singlepage rotate-key` | Issue a new deploy key for the site; the old one stops working. Also how a pre-deploy-key site gets its first key. |
 
