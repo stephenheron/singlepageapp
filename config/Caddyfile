@@ -1,0 +1,31 @@
+# Front proxy for single-page: terminates TLS with per-subdomain Let's Encrypt
+# certs issued ON DEMAND (no wildcard cert needed), then forwards to kamal-proxy.
+#
+#   :443  Caddy (this file)  ──reverse_proxy──►  :8080  kamal-proxy  ──►  :3000 app
+#
+# Cert issuance is gated by single-page's /internal/allow_domain endpoint, so
+# certs are only minted for hosts that map to a real site.
+
+{
+	# Let's Encrypt account email (set via the accessory's ACME_EMAIL env).
+	email {$ACME_EMAIL}
+
+	on_demand_tls {
+		# Before issuing a cert for <host>, ask the app (via kamal-proxy on
+		# :8080) whether it's a real site. 200 -> issue, anything else -> refuse.
+		ask http://127.0.0.1:8080/internal/allow_domain
+	}
+}
+
+# Public ingress: accept ANY host, obtain its cert on demand, forward upstream.
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:8080
+}
+
+# Redirect plain HTTP to HTTPS. Caddy still answers ACME http-01 challenges on :80.
+http:// {
+	redir https://{host}{uri} permanent
+}

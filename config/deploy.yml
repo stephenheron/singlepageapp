@@ -1,0 +1,87 @@
+# Kamal config for single-page — a Bun multi-tenant web host.
+# Docs: https://kamal-deploy.org
+#
+# TLS for the dynamic *.BASE_DOMAIN subdomains is handled by a Caddy accessory
+# (see config/Caddyfile) using on-demand Let's Encrypt certs — kamal-proxy can't
+# issue wildcard certs. Caddy owns :80/:443; kamal-proxy moves to :8080 and keeps
+# doing zero-downtime routing to the app.
+
+service: single-page
+
+# Image repository: registry.digitalocean.com/<registry-name>/<image>.
+# Registry name is "single-page-app"; the app image is "single-page".
+image: single-page-app/single-page
+
+# Deploy to this server.
+servers:
+  web:
+    - 138.68.181.120
+
+# --- Proxy ------------------------------------------------------------------
+# ssl:false because Caddy terminates TLS in front. kamal-proxy listens on 8080
+# (Caddy reverse-proxies to it) and routes all hosts to the single app.
+proxy:
+  ssl: false
+  app_port: 3000
+  healthcheck:
+    path: /up
+  run:
+    http_port: 8080
+    https_port: 8443
+
+# --- Registry ---------------------------------------------------------------
+# DigitalOcean Container Registry. Auth uses a DO API token (read/write) as BOTH
+# username and password — set both env vars to that token (see .kamal/secrets).
+# Kamal logs in on the builder + server for you.
+registry:
+  server: registry.digitalocean.com
+  username:
+    - KAMAL_REGISTRY_USERNAME
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+# --- Builder ----------------------------------------------------------------
+# Build ON the droplet (native amd64, no local emulation). `local: false` means
+# the image is never built on your Mac — you only need the docker CLI + buildx
+# plugin locally (`brew install docker docker-buildx`), not a Docker engine/VM.
+builder:
+  arch: amd64
+  remote: ssh://root@138.68.181.120
+  local: false
+
+# --- Environment ------------------------------------------------------------
+env:
+  clear:
+    # Apex domain; sites are served as <site>.BASE_DOMAIN.
+    BASE_DOMAIN: singlepageapp.co
+    PORT: 3000
+  secret:
+    - SINGLEPAGE_APP_TOKEN
+
+# --- Persistent storage -----------------------------------------------------
+# sites/ holds deployed site content AND per-site SQLite (KV + logs). It MUST
+# survive deploys — without this volume every deploy wipes all hosted sites.
+volumes:
+  - "single_page_sites:/app/sites"
+
+# --- Front proxy (TLS) ------------------------------------------------------
+# Caddy on host networking owns :80/:443, issues a cert per real subdomain on
+# demand (gated by the app's /internal/allow_domain), and forwards to :8080.
+accessories:
+  caddy:
+    image: caddy:2
+    host: 138.68.181.120
+    network: host
+    env:
+      clear:
+        ACME_EMAIL: stephen.heron@gmail.com
+    files:
+      - config/Caddyfile:/etc/caddy/Caddyfile
+    directories:
+      - data:/data # persist issued certs + ACME account across redeploys
+      - config:/config
+
+# Convenience: `kamal shell`, `kamal logs-tail`.
+aliases:
+  shell: app exec --interactive --reuse "bash"
+  logs-tail: app logs --follow

@@ -1,0 +1,19 @@
+# Keep the build context small and never bake runtime state into the image.
+.git
+.kamal
+.claude
+.cursor
+node_modules
+sites
+singlepage
+out
+dist
+coverage
+*.lcov
+*.log
+.env*
+.DS_Store
+*.tsbuildinfo
+*.test.ts
+IDEAS.md
+README.md

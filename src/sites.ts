@@ -1,5 +1,6 @@
 import { join, resolve, sep } from "node:path";
 import { readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { SITES_DIR, BASE_DOMAIN, PORT } from "./config.ts";
 
 // Shared client script injected into every served HTML page.
@@ -18,6 +19,24 @@ export function siteFromHost(host: string | null): string | null {
   // only support a single subdomain label, and reject anything path-ish
   if (!label || label.includes("/") || label.includes("..")) return null;
   return label;
+}
+
+/** True if `site` has a directory on disk under SITES_DIR. */
+export function siteExists(site: string): boolean {
+  return existsSync(join(SITES_DIR, site));
+}
+
+/**
+ * Whether a cert should exist for `host`: true for the apex domain or any
+ * existing site, false otherwise. Lets a front proxy mint a per-subdomain
+ * TLS cert on demand (no wildcard) while refusing unknown/bogus hosts.
+ */
+export function isKnownHost(host: string | null): boolean {
+  if (!host) return false;
+  const hostname = host.split(":")[0]!.toLowerCase(); // strip port
+  if (hostname === BASE_DOMAIN) return true; // apex landing page
+  const site = siteFromHost(hostname);
+  return site !== null && siteExists(site);
 }
 
 /**

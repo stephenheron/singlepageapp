@@ -10,6 +10,7 @@ import { handleKv } from "./kv.ts";
 import { handleApi } from "./api.ts";
 import {
   siteFromHost,
+  isKnownHost,
   apexResponse,
   INJECT_PATH,
   serveInjectScript,
@@ -29,8 +30,20 @@ const server = Bun.serve<WsData>({
   async fetch(req, server) {
     const url = new URL(req.url);
 
+    // Liveness/readiness probe (kamal-proxy health check, uptime monitors).
+    if (url.pathname === "/up") return new Response("ok");
+
     // Management API — handled before host-based routing.
     if (url.pathname.startsWith("/api/")) return handleApi(req, url);
+
+    // On-demand TLS gate for a front proxy: does this host map to a real site?
+    // Used by Caddy's on_demand_tls `ask` to scope cert issuance (see
+    // config/Caddyfile). Host-agnostic, so it must precede subdomain routing.
+    if (url.pathname === "/internal/allow_domain") {
+      return isKnownHost(url.searchParams.get("domain"))
+        ? new Response("ok")
+        : new Response("unknown host", { status: 404 });
+    }
 
     const site = siteFromHost(req.headers.get("host"));
 
