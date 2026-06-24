@@ -1,4 +1,5 @@
 import { join, resolve, sep } from "node:path";
+import { lookup } from "node:dns/promises";
 import {
   getQuickJS,
   shouldInterruptAfterDeadline,
@@ -49,6 +50,9 @@ export function isBlockedHost(hostname: string): boolean {
   if (h === "localhost" || h.endsWith(".localhost")) return true;
   if (h === "" || h === "0.0.0.0" || h === "::" || h === "::1") return true;
   if (h.startsWith("fe80:") || h.startsWith("fc") || h.startsWith("fd")) return true; // IPv6 link-local/ULA
+  // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) -> evaluate the embedded IPv4.
+  const mapped = h.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (mapped) return isBlockedHost(mapped[1]!);
   // IPv4 literals: loopback / private / link-local ranges.
   const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (m) {
@@ -61,40 +65,110 @@ export function isBlockedHost(hostname: string): boolean {
   return false;
 }
 
-/** Host-side fetch, JSON-in / JSON-out, with protocol + SSRF + size guards. */
+const MAX_REDIRECTS = 5;
+
+/** Resolve a hostname to its IP addresses. Injectable so the SSRF check is testable. */
+export type HostResolver = (hostname: string) => Promise<string[]>;
+const dnsResolver: HostResolver = async (hostname) =>
+  (await lookup(hostname, { all: true })).map((a) => a.address);
+
+/**
+ * SSRF host check. Rejects blocked literals up front, then resolves the hostname
+ * and rejects it if ANY resolved address is blocked — this is what catches a
+ * public name with a private/loopback/metadata A-record (DNS rebinding) and
+ * non-dotted-decimal encodings (e.g. 0x7f000001) that slip past the literal
+ * check but resolve to a blocked IP. Returns an error string, or null if allowed.
+ *
+ * Note: there's still a narrow TOCTOU window — `fetch` does its own resolution
+ * after this check, so a sub-second-rebinding resolver could differ. Closing
+ * that fully needs connect-time pinning, which Bun's fetch doesn't expose; this
+ * shuts the practical doors (redirects, static private records, encodings).
+ */
+export async function blockedHostReason(
+  hostname: string,
+  resolver: HostResolver = dnsResolver,
+): Promise<string | null> {
+  if (isBlockedHost(hostname)) return "host not allowed";
+  let addrs: string[];
+  try {
+    addrs = await resolver(hostname);
+  } catch {
+    return "host did not resolve";
+  }
+  if (!addrs.length) return "host did not resolve";
+  for (const address of addrs) {
+    if (isBlockedHost(address)) return "host resolves to a blocked address";
+  }
+  return null;
+}
+
+/**
+ * Host-side fetch, JSON-in / JSON-out, with protocol + SSRF + size guards.
+ * Redirects are followed MANUALLY (`redirect: "manual"`) so every hop's
+ * destination is re-validated — a single `redirect: "follow"` would let a public
+ * URL bounce to a private/metadata address unchecked.
+ */
 async function hostFetch(argsJson: string): Promise<string> {
   const fail = (error: string) => JSON.stringify({ error });
   try {
     const { url, init } = JSON.parse(argsJson) as { url: string; init: any };
-    let u: URL;
-    try {
-      u = new URL(url);
-    } catch {
-      return fail(`invalid url: ${url}`);
-    }
-    if (u.protocol !== "http:" && u.protocol !== "https:") return fail("protocol not allowed");
-    if (isBlockedHost(u.hostname)) return fail("host not allowed");
+    let currentUrl = url;
+    let method: string | undefined = init?.method;
+    let body: unknown = init?.body;
+    const headers = init?.headers;
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(u, {
-        method: init?.method,
-        headers: init?.headers,
-        body: init?.body,
-        redirect: "follow",
-        signal: ctrl.signal,
-      });
-      const buf = await res.arrayBuffer();
-      if (buf.byteLength > FETCH_MAX_BODY_BYTES) return fail("response too large");
-      const headers: Record<string, string> = {};
-      res.headers.forEach((v, k) => (headers[k] = v));
-      return JSON.stringify({
-        status: res.status,
-        ok: res.ok,
-        headers,
-        body: new TextDecoder().decode(buf),
-      });
+      for (let hop = 0; ; hop++) {
+        let u: URL;
+        try {
+          u = new URL(currentUrl);
+        } catch {
+          return fail(`invalid url: ${currentUrl}`);
+        }
+        if (u.protocol !== "http:" && u.protocol !== "https:") return fail("protocol not allowed");
+        const reason = await blockedHostReason(u.hostname);
+        if (reason) return fail(reason);
+
+        const res = await fetch(u, {
+          method,
+          headers,
+          body: body as any,
+          redirect: "manual",
+          signal: ctrl.signal,
+        });
+
+        // Follow redirects ourselves, re-validating each destination.
+        if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
+          if (hop >= MAX_REDIRECTS) return fail("too many redirects");
+          let next: URL;
+          try {
+            next = new URL(res.headers.get("location")!, u); // resolve relative
+          } catch {
+            return fail("invalid redirect location");
+          }
+          currentUrl = next.href;
+          // 307/308 preserve method + body; 301/302/303 drop to GET with no body
+          // so a sensitive request body is never replayed to a redirect target.
+          if (res.status !== 307 && res.status !== 308) {
+            method = "GET";
+            body = undefined;
+          }
+          continue;
+        }
+
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength > FETCH_MAX_BODY_BYTES) return fail("response too large");
+        const outHeaders: Record<string, string> = {};
+        res.headers.forEach((v, k) => (outHeaders[k] = v));
+        return JSON.stringify({
+          status: res.status,
+          ok: res.ok,
+          headers: outHeaders,
+          body: new TextDecoder().decode(buf),
+        });
+      }
     } finally {
       clearTimeout(timer);
     }

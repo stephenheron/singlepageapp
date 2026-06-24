@@ -1,7 +1,13 @@
 import { test, expect, afterAll } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { isBlockedHost, runModule, invalidate, __poolSnapshot } from "./sandbox.ts";
+import {
+  isBlockedHost,
+  blockedHostReason,
+  runModule,
+  invalidate,
+  __poolSnapshot,
+} from "./sandbox.ts";
 import { kvClass, kvGet } from "./kv.ts";
 import { SITES_DIR } from "./config.ts";
 
@@ -31,6 +37,46 @@ test("SSRF guard allows public hosts", () => {
   for (const h of ["example.com", "api.github.com", "8.8.8.8", "172.32.0.1", "1.1.1.1"]) {
     expect(isBlockedHost(h)).toBe(false);
   }
+});
+
+test("SSRF guard blocks IPv4-mapped IPv6 forms", () => {
+  for (const h of ["::ffff:127.0.0.1", "[::ffff:127.0.0.1]", "::ffff:169.254.169.254"]) {
+    expect(isBlockedHost(h)).toBe(true);
+  }
+});
+
+test("blockedHostReason rejects blocked literals without resolving", async () => {
+  const explode = async () => {
+    throw new Error("resolver should not be called for a blocked literal");
+  };
+  expect(await blockedHostReason("127.0.0.1", explode)).toBeTruthy();
+  expect(await blockedHostReason("169.254.169.254", explode)).toBeTruthy();
+});
+
+test("blockedHostReason rejects names that resolve to a blocked address (DNS rebinding)", async () => {
+  const toMetadata = async () => ["169.254.169.254"]; // attacker A-record -> cloud metadata
+  expect(await blockedHostReason("evil.example.com", toMetadata)).toBe(
+    "host resolves to a blocked address",
+  );
+  const toLoopback = async () => ["93.184.216.34", "127.0.0.1"]; // one bad address is enough
+  expect(await blockedHostReason("mixed.example.com", toLoopback)).toBe(
+    "host resolves to a blocked address",
+  );
+});
+
+test("blockedHostReason allows names that resolve to public addresses", async () => {
+  const toPublic = async () => ["93.184.216.34"];
+  expect(await blockedHostReason("example.com", toPublic)).toBeNull();
+});
+
+test("blockedHostReason rejects names that fail to resolve", async () => {
+  const nxdomain = async () => {
+    throw new Error("ENOTFOUND");
+  };
+  // e.g. an alternate IP encoding that isn't a valid hostname and won't resolve.
+  expect(await blockedHostReason("0x7f000001", nxdomain)).toBe("host did not resolve");
+  const empty = async () => [];
+  expect(await blockedHostReason("void.example.com", empty)).toBe("host did not resolve");
 });
 
 test("runs a handler and returns its value", async () => {
