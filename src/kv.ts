@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { SITES_DIR, json } from "./config.ts";
-import { broadcast } from "./events.ts";
+import { broadcast, broadcastKv } from "./events.ts";
 
 // Open SQLite connections, one cached per site. The database lives at
 // sites/<name>/data/db.sqlite — outside public/server/cron, so it is never
@@ -29,7 +29,8 @@ export function ensureDb(site: string): Database {
 // --- KV helpers --------------------------------------------------------------
 // Synchronous primitives shared by the HTTP handler (handleKv) and the server
 // /cron sandbox. Values are opaque text — callers store JSON. kvSet broadcasts a
-// "kv" SSE event so every open page (and any sandbox writer) stays live.
+// "kv" change so subscribed pages (and any sandbox writer) stay live; delivery
+// is filtered per-socket by each page's subscription (see broadcastKv).
 
 /** Stored value for a key, or null if absent. */
 export function kvGet(site: string, key: string): string | null {
@@ -54,13 +55,13 @@ export function kvSet(site: string, key: string, value: string): void {
   } catch {
     parsed = value;
   }
-  broadcast(site, "kv", JSON.stringify({ key, action: "set", value: parsed }));
+  broadcastKv(site, key, { key, action: "set", value: parsed });
 }
 
 /** Remove `key` and notify open pages. */
 export function kvRemove(site: string, key: string): void {
   ensureDb(site).query("DELETE FROM kv WHERE key = ?").run(key);
-  broadcast(site, "kv", JSON.stringify({ key, action: "delete" }));
+  broadcastKv(site, key, { key, action: "delete" });
 }
 
 /** All keys, sorted. */
@@ -89,7 +90,7 @@ export function appendLog(site: string, source: string, level: string, message: 
   db.query(
     "DELETE FROM logs WHERE id <= (SELECT MAX(id) FROM logs) - ?",
   ).run(LOG_RETENTION);
-  broadcast(site, "log", JSON.stringify({ ts, source, level, message }));
+  broadcast(site, "log", { ts, source, level, message });
 }
 
 /**

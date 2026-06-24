@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 
 export const PORT = Number(process.env.PORT ?? 3000);
 export const BASE_DOMAIN = process.env.BASE_DOMAIN ?? "localhost";
-export const SITES_DIR = resolve(import.meta.dir, "sites");
+export const SITES_DIR = resolve(import.meta.dir, "..", "sites");
 
 /** Build a JSON Response. */
 export function json(data: unknown, status = 200): Response {

@@ -20,8 +20,18 @@ const site = location.hostname.split(".")[0];
 // A per-site store backed by the site's SQLite db. Import it as a module:
 //   import { kv } from "/__inject.js";
 // Values are any JSON-serializable data. Scoped to this site by origin.
-// Change events arrive over the shared SSE stream (see connectEvents below).
-const kvSubscribers = new Set(); // handlers for live { key, action, value } changes
+// Change events arrive over the shared WebSocket (see connectEvents below).
+//
+// Each subscriber declares a pattern (an exact key, a "prefix:*", or "*" for
+// everything). We tell the server the union of those patterns so it only sends
+// matching changes; we still match per-handler here so one page's broad
+// subscription doesn't fire another handler that asked for a narrower key.
+const kvSubscribers = new Set(); // { pattern, handler } entries
+
+/** Does `key` match a subscription `pattern`? Mirrors `matches` in events.ts. */
+function matchPattern(pattern, key) {
+  return pattern.endsWith("*") ? key.startsWith(pattern.slice(0, -1)) : pattern === key;
+}
 
 export const kv = {
   async get(key) {
@@ -46,17 +56,26 @@ export const kv = {
     if (!res.ok) throw new Error(`kv.keys() → ${res.status}`);
     return res.json();
   },
-  // Listen for changes to any key. handler({ key, action, value }); action is
-  // "set" (value present) or "delete". Returns an unsubscribe function.
-  subscribe(handler) {
-    kvSubscribers.add(handler);
-    return () => kvSubscribers.delete(handler);
+  // Listen for KV changes. handler({ key, action, value }); action is "set"
+  // (value present) or "delete". Returns an unsubscribe function.
+  //   subscribe(handler)            -> all keys (current behavior)
+  //   subscribe(pattern, handler)   -> only keys matching pattern ("chat:*" or "k")
+  // Declaring a pattern lets the server filter, so the page isn't sent every key.
+  subscribe(patternOrHandler, maybeHandler) {
+    const entry =
+      typeof patternOrHandler === "function"
+        ? { pattern: "*", handler: patternOrHandler }
+        : { pattern: patternOrHandler, handler: maybeHandler };
+    kvSubscribers.add(entry);
+    syncSubscriptions();
+    return () => {
+      kvSubscribers.delete(entry);
+      syncSubscriptions();
+    };
   },
   // Convenience: listen for changes to a single key. Returns unsubscribe.
   on(key, handler) {
-    return kv.subscribe((change) => {
-      if (change.key === key) handler(change);
-    });
+    return kv.subscribe(key, handler);
   },
 };
 
@@ -108,40 +127,73 @@ fn.get = (name, query) => fn(name, { method: "GET", query });
 fn.post = (name, body, opts) => fn(name, { ...opts, method: "POST", body });
 
 // --- event stream ----------------------------------------------------------
-// One per-site SSE connection carries every event type: "change" (live reload)
-// and "kv" (key/value store changes). NOTE on scale: the server pushes ALL of a
-// site's kv changes to every page; kv.on(key) filters here on the client. Fine
-// for chat-sized loads, but won't scale to high write volume or many keys —
-// the future fix is server-side per-key subscriptions.
-function connectEvents() {
-  const es = new EventSource("/__events"); // auto-reconnects on drop
+// One per-site WebSocket carries every frame as { type, data }: "change" (live
+// reload) and "log" go to every page; "kv" (key/value store changes) is filtered
+// server-side by this page's subscription. We send the union of our subscribers'
+// patterns as { type: "sub", patterns: [...] } and re-send it whenever it changes
+// or the socket (re)opens, so the server only pushes the keys this page wants.
+let ws = null;
+let reloadTimer;
 
-  // Live reload: deploys refresh the page (CSS hot-swaps without a full reload).
-  let reloadTimer;
-  es.addEventListener("change", (e) => {
-    const path = e.data;
+function connectEvents() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/__events`);
+  ws.addEventListener("open", postSubscriptions); // (re)establish our filter
+  ws.addEventListener("message", onMessage);
+  // WebSocket has no auto-reconnect (unlike EventSource); retry on drop.
+  ws.addEventListener("close", () => {
+    ws = null;
+    setTimeout(connectEvents, 2000);
+  });
+  ws.addEventListener("error", () => {
+    try {
+      ws && ws.close();
+    } catch (_) {}
+  });
+}
+
+function onMessage(e) {
+  let msg;
+  try {
+    msg = JSON.parse(e.data); // { type, data }
+  } catch {
+    return;
+  }
+  if (msg.type === "change") {
+    // Live reload: deploys refresh the page (CSS hot-swaps without a full reload).
+    const path = msg.data;
     if (path.endsWith(".css") && hotSwapCss(path)) return;
     // Coalesce a burst of changes into a single reload.
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(() => location.reload(), 100);
-  });
+  } else if (msg.type === "kv") {
+    dispatchKv(msg.data); // { key, action, value? }
+  }
+  // "log" frames are ignored on the page (used by tooling/devtools).
+}
 
-  // KV changes: fan out to subscribers registered via kv.subscribe / kv.on.
-  es.addEventListener("kv", (e) => {
-    let change;
+// Fan a kv change out to subscribers, matching each by its declared pattern.
+function dispatchKv(change) {
+  for (const { pattern, handler } of kvSubscribers) {
+    if (!matchPattern(pattern, change.key)) continue;
     try {
-      change = JSON.parse(e.data); // { key, action, value? }
-    } catch {
-      return;
+      handler(change);
+    } catch (err) {
+      console.error("[inject] kv subscriber threw", err);
     }
-    for (const handler of kvSubscribers) {
-      try {
-        handler(change);
-      } catch (err) {
-        console.error("[inject] kv subscriber threw", err);
-      }
-    }
-  });
+  }
+}
+
+// Tell the server the union of patterns we care about. Sent on every change and
+// on each (re)open; a no-op until the socket is open (then sent from `open`).
+function syncSubscriptions() {
+  postSubscriptions();
+}
+
+function postSubscriptions() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const patterns = [...new Set([...kvSubscribers].map((s) => s.pattern))];
+  ws.send(JSON.stringify({ type: "sub", patterns }));
 }
 
 // Re-point a matching <link rel=stylesheet> with a cache-bust. Returns false

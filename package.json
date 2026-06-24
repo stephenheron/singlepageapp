@@ -1,14 +1,14 @@
 {
   "name": "single-page",
-  "module": "index.ts",
+  "module": "src/index.ts",
   "type": "module",
   "private": true,
   "bin": {
-    "singlepage": "./cli.ts"
+    "singlepage": "./src/cli.ts"
   },
   "scripts": {
-    "start": "bun index.ts",
-    "build:cli": "bun build ./cli.ts --compile --outfile singlepage"
+    "start": "bun src/index.ts",
+    "build:cli": "bun build ./src/cli.ts --compile --outfile singlepage"
   },
   "devDependencies": {
     "@types/bun": "latest"

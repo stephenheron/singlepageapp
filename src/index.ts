@@ -1,5 +1,11 @@
-import { PORT, BASE_DOMAIN } from "./config.ts";
-import { EVENTS_PATH, eventStream } from "./events.ts";
+import { PORT, BASE_DOMAIN, SITES_DIR } from "./config.ts";
+import {
+  EVENTS_PATH,
+  addClient,
+  removeClient,
+  onSubMessage,
+  type WsData,
+} from "./events.ts";
 import { handleKv } from "./kv.ts";
 import { handleApi } from "./api.ts";
 import {
@@ -18,9 +24,9 @@ import { startCron } from "./cron.ts";
  * stream (/__events), and a token-gated management API (/api/*). See the
  * individual modules for details.
  */
-const server = Bun.serve({
+const server = Bun.serve<WsData>({
   port: PORT,
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
 
     // Management API — handled before host-based routing.
@@ -37,8 +43,12 @@ const server = Bun.serve({
 
     const { pathname } = url;
 
-    // Reserved route: per-site event stream (live reload + kv changes).
-    if (pathname === EVENTS_PATH) return eventStream(site);
+    // Reserved route: per-site event stream (live reload + kv changes) over a
+    // WebSocket. The socket's per-page subscription filter lives on ws.data.
+    if (pathname === EVENTS_PATH) {
+      if (server.upgrade(req, { data: { site, patterns: new Set() } })) return;
+      return new Response("expected websocket", { status: 426 });
+    }
 
     // Reserved route: per-site key/value store (host-scoped, browser-accessible).
     if (pathname === "/__kv" || pathname.startsWith("/__kv/")) {
@@ -58,11 +68,16 @@ const server = Bun.serve({
     // Everything else: a static file from the site's public/ dir.
     return serveStatic(site, pathname);
   },
+  websocket: {
+    open: addClient,
+    message: onSubMessage,
+    close: removeClient,
+  },
 });
 
 // Schedule each site's cron jobs from its singlepage.json.
 startCron();
 
-console.log(`Serving sites from ${import.meta.dir}/sites`);
+console.log(`Serving sites from ${SITES_DIR}`);
 console.log(`Listening on http://${BASE_DOMAIN}:${server.port}`);
 console.log(`Try http://test-site.${BASE_DOMAIN}:${server.port}/`);
