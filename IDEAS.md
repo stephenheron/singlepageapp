@@ -42,26 +42,37 @@ served/public files; key rotation/revocation; migration for existing sites.
 
 ---
 
-## 2. Smarter event subscriptions (stop fanning out everything)
+## 2. Smarter event subscriptions (stop fanning out everything) — ✅ done
 
-**Today.** `events.ts` keeps one SSE connection per open page per site and
-**broadcasts every KV change to every page of that site**; per-key filtering
-happens on the client (`kv.on(key)` filters in `client/inject.js`). The value is
-included in the broadcast payload. This is already flagged in `events.ts` as
-"fine for chat-sized loads" but wasteful: every page receives every key's every
-change (and its value), even keys it never subscribed to.
+**Was.** `events.ts` kept one SSE connection per open page per site and
+**broadcast every KV change to every page of that site**; per-key filtering
+happened on the client (`kv.on(key)` filtered in `client/inject.js`), and the
+value rode along in every broadcast — so every page received every key's every
+change, even keys it never subscribed to.
 
-Problems: redundant traffic that grows with write volume × open pages; values
-leak to clients that didn't ask for them (ties into #3); no way to scope a stream.
+**Now (implemented).** The event bus moved from SSE to a **per-site WebSocket**
+(`/__events`, upgraded in `index.ts`), and KV filtering happens **server-side**:
 
-**Direction.** Server-side, per-key (or per-prefix) subscriptions:
+- Each socket declares the keys/prefixes it wants by sending
+  `{ type: "sub", patterns: [...] }`; the server stores that on `ws.data` and
+  only delivers matching `kv` changes (`broadcastKv` + `matches` in `events.ts`).
+- Pattern matching: exact key, or a trailing-`*` prefix (`room:123:*`); `"*"`
+  alone means everything. The client mirrors the same rule (`matchPattern` in
+  `client/inject.js`) so multiplexed handlers on one socket don't cross-fire.
+- The `kv.on/subscribe` surface is preserved and extended:
+  `kv.subscribe(handler)` still means "all" (back-compat), while
+  `kv.subscribe(pattern, handler)` / `kv.on(key, handler)` opt into filtering.
+  The client sends the **union** of its subscribers' patterns and re-sends it on
+  every change and on each (re)connect.
+- `change` (live reload) and `log` frames still go to every socket unfiltered.
+- Frames are now `{ type, data }` JSON envelopes; Bun's built-in keepalive pings
+  replaced the manual SSE heartbeat. Covered by `events.test.ts`.
 
-- A client → server subscribe channel: a page registers the keys/prefixes it
-  cares about, and the server only sends matching changes.
-- Only deliver values the subscriber is allowed to see (respect #3 visibility).
-- Consider namespaces/prefixes (`room:123:*`) so a page can subscribe to a slice.
-- Keep the current `kv.on/subscribe` client API as the surface; change what's
-  delivered underneath.
+**Still open.** Values are still delivered to anyone whose pattern matches — we
+don't yet *withhold* values a subscriber shouldn't see; that needs the #3
+visibility classes (private keys must never be broadcast, read-only keys only to
+permitted subscribers). The per-socket filter is the natural enforcement point,
+and an auth handshake (#1) fits as a first WS message.
 
 ---
 
@@ -101,5 +112,6 @@ client-vs-backend).
 ---
 
 These three reinforce each other: real auth (#1) makes per-key visibility (#3)
-meaningful, and scoped subscriptions (#2) are what actually keeps private/
-read-only data from leaking to the wrong client.
+meaningful, and scoped subscriptions (#2, now done) are the delivery mechanism
+that keeps private/read-only data from leaking to the wrong client — once #3
+defines *what* to withhold, #2's per-socket filter is where it gets enforced.
