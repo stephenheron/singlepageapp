@@ -69,50 +69,61 @@ change, even keys it never subscribed to.
 - Frames are now `{ type, data }` JSON envelopes; Bun's built-in keepalive pings
   replaced the manual SSE heartbeat. Covered by `events.test.ts`.
 
-**Still open.** Values are still delivered to anyone whose pattern matches — we
-don't yet *withhold* values a subscriber shouldn't see; that needs the #3
-visibility classes (private keys must never be broadcast, read-only keys only to
-permitted subscribers). The per-socket filter is the natural enforcement point,
-and an auth handshake (#1) fits as a first WS message.
+**Now also (via #3).** Private keys are no longer broadcast at all — `kvSet`
+/`kvRemove` skip the fan-out for them — so values a client shouldn't see never
+reach the wire. Read-only and read-write changes still broadcast to any matching
+subscriber (both are client-readable). Withholding values *per user* (only
+permitted subscribers) still needs end-user auth (#1); an auth handshake fits as
+a first WS message, and the per-socket filter remains the natural enforcement
+point.
 
 ---
 
-## 3. KV visibility / access classes for server + cron
+## 3. KV visibility / access classes for server + cron — ✅ done
 
-**Today.** One KV store per site, one table `kv(key, value, updated_at)` in
-`kv.ts`. The same data is reachable two ways with the **same** permissions:
+**Was.** One KV store per site, one table `kv(key, value, updated_at)` in
+`kv.ts`. The same data was reachable two ways with the **same** permissions:
 
 - Browser: `/__kv` — full read + write (`handleKv`).
 - Backend (server functions / cron): `ctx.kv.get/set/remove/keys` via the sync
   helpers `kvGet/kvSet/kvRemove/kvKeys`.
 
-There is no way to keep a value away from the client, or to let the client read
-but not write it. Everything in KV is client-readable and client-writable.
+There was no way to keep a value away from the client, or to let the client read
+but not write it. Everything in KV was client-readable and client-writable.
 
-**Direction.** Visibility classes per key (or per namespace), enforced at the
-`/__kv` boundary while the backend keeps full access:
+**Now (implemented).** Each key carries a **visibility class** stored in a new
+`class` column on the `kv` table (`kv(key, value, updated_at, class)`), enforced
+at the `/__kv` boundary and the event fan-out while the backend keeps full
+access:
 
-- **private** — backend (server/cron) only; never returned over `/__kv`, never
-  broadcast to clients. For secrets, server-computed state, API keys (overlaps
-  with the deferred per-site secrets store).
-- **read-only** — client can read (and subscribe), but only the backend can
-  write. `/__kv` PUT/DELETE rejected for these keys; writes go through server
-  functions.
-- **read-write** — current behavior (client read + write).
+- **private** — backend (server/cron) only. To a client the key looks absent:
+  `handleKv` returns `404 null` for **every** method (GET/PUT/DELETE), it's
+  excluded from the `/__kv` key listing (`kvVisibleKeys`), and its changes are
+  **never broadcast** (`kvSet`/`kvRemove` skip `broadcastKv` for private keys).
+  For secrets, server-computed state, API keys.
+- **read-only** — clients can read (and subscribe over the WebSocket), but only
+  the backend can write: `/__kv` PUT/DELETE return `403`. Changes still
+  broadcast, since clients are allowed to read them.
+- **read-write** — the default and prior behavior (client read + write).
 
-Sketch: store a class per key (extra column, or naming convention / namespace
-prefixes like `_private:*`, `_ro:*`), enforce it in `handleKv` and in the event
-fan-out (#2 — never broadcast private keys, and only push read-only/read-write
-changes to permitted subscribers). The backend `ctx.kv` ignores the class and
-sees everything.
+How a class is assigned: the **backend owns it** — only server/cron code sets a
+class, via `ctx.kv.set(key, value, { class })` or `ctx.kv.setClass(key, class)`
+(wired through `__host_kv_set`/`__host_kv_set_class` in `sandbox.ts` to
+`kvSet`/`kvSetClass`). A plain `set` with no class preserves an existing key's
+class; new keys default to read-write. Client writes over `/__kv` never set a
+class. Existing databases are migrated in `ensureDb` (`ALTER TABLE kv ADD COLUMN
+class … DEFAULT 'readwrite'`), so prior rows become read-write. Covered by
+`kv.test.ts` and a sandbox wiring test in `sandbox.test.ts`.
 
-Open questions: per-key metadata vs prefix convention; how a server function
-declares/assigns a class; interaction with #1 (per-user visibility, not just
-client-vs-backend).
+**Still open.** Classes today are client-vs-backend only; per-*user* visibility
+(key A visible to user X but not Y) needs end-user auth (#1) and is not yet
+addressed. Private GET/PUT/DELETE all return `404` to hide existence, but an
+adversary who can also create keys could still probe via write timing — a
+non-issue for value confidentiality, which is what this protects.
 
 ---
 
-These three reinforce each other: real auth (#1) makes per-key visibility (#3)
-meaningful, and scoped subscriptions (#2, now done) are the delivery mechanism
-that keeps private/read-only data from leaking to the wrong client — once #3
-defines *what* to withhold, #2's per-socket filter is where it gets enforced.
+These three reinforce each other: real auth (#1) would extend per-key visibility
+(#3) to per-user, and scoped subscriptions (#2) are the delivery mechanism that
+already keeps private data off the wire — #3 defines *what* to withhold and the
+WebSocket fan-out is where it's enforced.

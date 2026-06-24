@@ -7,7 +7,7 @@ import {
   type QuickJSHandle,
 } from "quickjs-emscripten";
 import { SITES_DIR } from "./config.ts";
-import { kvGet, kvSet, kvRemove, kvKeys, appendLog } from "./kv.ts";
+import { kvGet, kvSet, kvRemove, kvKeys, kvSetClass, appendLog, type KvClass } from "./kv.ts";
 
 /**
  * The single boundary to the QuickJS WASM sandbox. Nothing else in the codebase
@@ -121,7 +121,14 @@ globalThis.__ctx = (() => {
   globalThis.console = console;
   const kv = {
     get(key) { const v = __host_kv_get(String(key)); return v === null ? null : JSON.parse(v); },
-    set(key, value) { __host_kv_set(String(key), JSON.stringify(value === undefined ? null : value)); },
+    set(key, value, options) {
+      __host_kv_set(
+        String(key),
+        JSON.stringify(value === undefined ? null : value),
+        options && options.class ? String(options.class) : "",
+      );
+    },
+    setClass(key, cls) { __host_kv_set_class(String(key), String(cls)); },
     remove(key) { __host_kv_remove(String(key)); },
     keys() { return JSON.parse(__host_kv_keys()); },
   };
@@ -380,8 +387,21 @@ async function loadEntry(
   );
   install(
     "__host_kv_set",
-    context.newFunction("__host_kv_set", (keyH, valH) => {
-      kvSet(site, context.getString(keyH), context.getString(valH));
+    context.newFunction("__host_kv_set", (keyH, valH, clsH) => {
+      const cls = clsH ? context.getString(clsH) : "";
+      kvSet(
+        site,
+        context.getString(keyH),
+        context.getString(valH),
+        cls ? (cls as KvClass) : undefined,
+      );
+      return context.undefined;
+    }),
+  );
+  install(
+    "__host_kv_set_class",
+    context.newFunction("__host_kv_set_class", (keyH, clsH) => {
+      kvSetClass(site, context.getString(keyH), context.getString(clsH) as KvClass);
       return context.undefined;
     }),
   );

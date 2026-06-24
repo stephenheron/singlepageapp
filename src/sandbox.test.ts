@@ -2,6 +2,7 @@ import { test, expect, afterAll } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { isBlockedHost, runModule, invalidate, __poolSnapshot } from "./sandbox.ts";
+import { kvClass, kvGet } from "./kv.ts";
 import { SITES_DIR } from "./config.ts";
 
 const TEST_SITE = "_sandbox_test_site";
@@ -40,6 +41,25 @@ test("runs a handler and returns its value", async () => {
   const r = await runModule(TEST_SITE, "server/echo.js", { query: { n: 5 } }, { deadlineMs: 2000 });
   expect(r.ok).toBe(true);
   if (r.ok) expect(JSON.parse((r.value as any).body).echoed).toBe(5);
+});
+
+test("ctx.kv.set forwards a visibility class to the backend", async () => {
+  await Bun.write(
+    join(SITES_DIR, TEST_SITE, "server", "secret.js"),
+    `export default (req, ctx) => {
+      ctx.kv.set("apiKey", "s3cret", { class: "private" });
+      ctx.kv.set("config", { theme: "dark" }, { class: "readonly" });
+      ctx.kv.set("count", 1);
+      ctx.kv.setClass("count", "private");
+      return ctx.json({ ok: true });
+    };`,
+  );
+  const r = await runModule(TEST_SITE, "server/secret.js", {}, { deadlineMs: 2000 });
+  expect(r.ok).toBe(true);
+  expect(kvClass(TEST_SITE, "apiKey")).toBe("private");
+  expect(kvClass(TEST_SITE, "config")).toBe("readonly");
+  expect(kvClass(TEST_SITE, "count")).toBe("private");
+  expect(kvGet(TEST_SITE, "apiKey")).toBe('"s3cret"');
 });
 
 // Regression: disposing a context must not leak handles / corrupt the shared
