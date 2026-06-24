@@ -109,7 +109,7 @@ async function ensureGitignored(entry: string): Promise<void> {
 // Admin token authorizes site creation + deploy-key rotation; the deploy key
 // authorizes file uploads for one site. Credentials file wins, env is a fallback.
 const resolveAdminToken = (creds: Creds): string | undefined =>
-  creds.adminToken ?? process.env.SINGLEPAGE_TOKEN;
+  creds.adminToken ?? process.env.SINGLEPAGE_APP_TOKEN;
 const resolveDeployKey = (creds: Creds): string | undefined =>
   creds.deployKey ?? process.env.SINGLEPAGE_DEPLOY_KEY;
 
@@ -137,7 +137,7 @@ async function init() {
   const adminToken = resolveAdminToken(creds);
   if (!adminToken) {
     console.error(
-      "An admin token is required to create a site. Set SINGLEPAGE_TOKEN (e.g. in a .env file) and retry.",
+      "An admin token is required to create a site. Set SINGLEPAGE_APP_TOKEN (e.g. in a .env file) and retry.",
     );
     process.exit(1);
   }
@@ -173,7 +173,7 @@ async function init() {
   }
 
   if (res.status === 401) {
-    console.error("Unauthorized — the admin token (SINGLEPAGE_TOKEN) doesn't match the server.");
+    console.error("Unauthorized — the admin token (SINGLEPAGE_APP_TOKEN) doesn't match the server.");
     process.exit(1);
   }
   if (!res.ok) {
@@ -211,7 +211,7 @@ async function rotateKey() {
   const adminToken = resolveAdminToken(creds);
   if (!adminToken) {
     console.error(
-      "An admin token is required to rotate a deploy key. Set SINGLEPAGE_TOKEN and retry.",
+      "An admin token is required to rotate a deploy key. Set SINGLEPAGE_APP_TOKEN and retry.",
     );
     process.exit(1);
   }
@@ -228,7 +228,7 @@ async function rotateKey() {
   }
 
   if (res.status === 401) {
-    console.error("Unauthorized — the admin token (SINGLEPAGE_TOKEN) doesn't match the server.");
+    console.error("Unauthorized — the admin token (SINGLEPAGE_APP_TOKEN) doesn't match the server.");
     process.exit(1);
   }
   if (!res.ok) {

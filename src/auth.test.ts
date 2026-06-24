@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { SITES_DIR } from "./config.ts";
 import { metaGet, kvGet } from "./kv.ts";
 
-// api.ts reads SINGLEPAGE_TOKEN at import time and exits if it's unset, so set
+// api.ts reads SINGLEPAGE_APP_TOKEN at import time and exits if it's unset, so set
 // the admin token first, then import it dynamically (after the env is in place).
 const ADMIN = "test-admin-token";
-process.env.SINGLEPAGE_TOKEN = ADMIN;
+process.env.SINGLEPAGE_APP_TOKEN = ADMIN;
 const { handleApi } = await import("./api.ts");
 
 const created: string[] = [];

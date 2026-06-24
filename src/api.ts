@@ -22,9 +22,9 @@ function onSourceChange(site: string, relpath: string): void {
 // Admin token: a single shared secret that authorizes site creation and deploy-
 // key rotation (but NOT file writes — those require the per-site deploy key).
 // Sent as `Authorization: Bearer <token>`. The server refuses to start without it.
-const ADMIN_TOKEN: string = process.env.SINGLEPAGE_TOKEN ?? "";
+const ADMIN_TOKEN: string = process.env.SINGLEPAGE_APP_TOKEN ?? "";
 if (!ADMIN_TOKEN) {
-  console.error("SINGLEPAGE_TOKEN is required. Set it to a shared secret and restart.");
+  console.error("SINGLEPAGE_APP_TOKEN is required. Set it to a shared secret and restart.");
   process.exit(1);
 }
 
@@ -143,7 +143,7 @@ function resolveSiteFile(name: string, relpath: string): string | null {
  * Management API (host-agnostic; mounted under /api/).
  *
  * Auth model: site creation and deploy-key rotation require the admin token
- * (SINGLEPAGE_TOKEN); file writes require the target site's own deploy key. The
+ * (SINGLEPAGE_APP_TOKEN); file writes require the target site's own deploy key. The
  * admin token cannot deploy files — keys are strictly scoped to their site.
  */
 export async function handleApi(req: Request, url: URL): Promise<Response> {

@@ -21,10 +21,10 @@ Install dependencies and start the server:
 
 ```bash
 bun install
-SINGLEPAGE_TOKEN=dev-secret bun start
+SINGLEPAGE_APP_TOKEN=dev-secret bun start
 ```
 
-`SINGLEPAGE_TOKEN` is the **admin token** (required — the server refuses to start
+`SINGLEPAGE_APP_TOKEN` is the **admin token** (required — the server refuses to start
 without it). It authorizes site creation and deploy-key rotation, nothing else.
 
 Now create and deploy a site with the `singlepage` CLI. Build it once, then work
@@ -34,7 +34,7 @@ from your project directory:
 bun run build:cli          # produces ./singlepage (or run `bun src/cli.ts`)
 
 mkdir my-site && cd my-site
-SINGLEPAGE_TOKEN=dev-secret singlepage init   # creates the site, scaffolds dirs
+SINGLEPAGE_APP_TOKEN=dev-secret singlepage init   # creates the site, scaffolds dirs
 singlepage watch                              # uploads + live-syncs on change
 ```
 
@@ -152,7 +152,7 @@ never are).
 
 Two secret types, strictly scoped:
 
-- **Admin token** (`SINGLEPAGE_TOKEN`) — site creation (`POST /api/sites`) and
+- **Admin token** (`SINGLEPAGE_APP_TOKEN`) — site creation (`POST /api/sites`) and
   deploy-key rotation only. It **cannot** write files.
 - **Per-site deploy key** — file uploads/deletes for one site
   (`PUT/DELETE /api/sites/<name>/files`). Site A's key can't touch site B. Only
@@ -176,7 +176,7 @@ guarded against traversal.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `SINGLEPAGE_TOKEN` | — (required) | Admin token (server + CLI). |
+| `SINGLEPAGE_APP_TOKEN` | — (required) | Admin token (server + CLI). |
 | `SINGLEPAGE_DEPLOY_KEY` | — | Fallback deploy key for the CLI (the credentials file wins). |
 | `PORT` | `3000` | Listen port. |
 | `BASE_DOMAIN` | `localhost` | Apex domain; sites are `<site>.<BASE_DOMAIN>`. |

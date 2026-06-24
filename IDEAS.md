@@ -7,15 +7,15 @@ A running list of things we want to improve. Each entry notes how it works today
 
 ## 1. Per-site deploy keys — ✅ done
 
-**Was.** There was exactly one secret: `SINGLEPAGE_TOKEN`, a single shared
+**Was.** There was exactly one secret: `SINGLEPAGE_APP_TOKEN`, a single shared
 bearer token that gated the entire management/write API. Anyone holding it could
 write to **any** site — `PUT/DELETE /api/sites/<name>/files` for any `<name>` —
 as well as create sites. No isolation: one key ruled them all.
 
-**Now (implemented).** `SINGLEPAGE_TOKEN` is now an **admin** token, and each
+**Now (implemented).** `SINGLEPAGE_APP_TOKEN` is now an **admin** token, and each
 site has its own **deploy key** with strict isolation:
 
-- `SINGLEPAGE_TOKEN` authorizes only site creation (`POST /api/sites`) and
+- `SINGLEPAGE_APP_TOKEN` authorizes only site creation (`POST /api/sites`) and
   deploy-key rotation (`authorized` in `api.ts`). It can **no longer** write
   files.
 - File writes (`PUT/DELETE /api/sites/<name>/files`) require *that site's* deploy
