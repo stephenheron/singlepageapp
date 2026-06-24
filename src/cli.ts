@@ -6,16 +6,52 @@ import { watch as fsWatch } from "node:fs";
 const CONFIG = "singlepage.json";
 const SCAFFOLD_DIRS = ["public", "server", "cron"];
 
-// Required shared secret, sent as a bearer token on every API request.
-const TOKEN = process.env.SINGLEPAGE_TOKEN;
-const authHeaders = (): Record<string, string> => ({ authorization: `Bearer ${TOKEN}` });
+// Local secrets, kept OUT of singlepage.json (which is synced to the server) and
+// gitignored. Holds the admin token (site creation + key rotation) and this
+// site's deploy key (file uploads). Never uploaded.
+const CREDS = ".singlepage.credentials.json";
+type Creds = { adminToken?: string; deployKey?: string };
 
-function requireToken(): void {
-  if (!TOKEN) {
-    console.error("SINGLEPAGE_TOKEN is required. Set it (e.g. in a .env file) and retry.");
-    process.exit(1);
+async function loadCreds(): Promise<Creds> {
+  try {
+    return (await Bun.file(CREDS).json()) as Creds;
+  } catch {
+    return {}; // no credentials file yet
   }
 }
+
+async function saveCreds(creds: Creds): Promise<void> {
+  await Bun.write(CREDS, JSON.stringify(creds, null, 2) + "\n");
+  await ensureGitignored(CREDS);
+}
+
+/** Append `entry` to ./.gitignore if not already present (creating it if absent). */
+async function ensureGitignored(entry: string): Promise<void> {
+  let contents = "";
+  try {
+    contents = await Bun.file(".gitignore").text();
+  } catch {
+    // no .gitignore yet — we'll create one
+  }
+  if (contents.split("\n").some((l) => l.trim() === entry)) return;
+  const prefix = contents && !contents.endsWith("\n") ? "\n" : "";
+  await Bun.write(".gitignore", contents + prefix + entry + "\n");
+}
+
+// Admin token authorizes site creation + deploy-key rotation; the deploy key
+// authorizes file uploads for one site. Credentials file wins, env is a fallback.
+const resolveAdminToken = (creds: Creds): string | undefined =>
+  creds.adminToken ?? process.env.SINGLEPAGE_TOKEN;
+const resolveDeployKey = (creds: Creds): string | undefined =>
+  creds.deployKey ?? process.env.SINGLEPAGE_DEPLOY_KEY;
+
+const bearerHeaders = (token: string): Record<string, string> => ({
+  authorization: `Bearer ${token}`,
+});
+
+// Header set used for file uploads/deletes; populated with the deploy key in watch().
+let fileAuthHeaders: Record<string, string> = {};
+const authHeaders = (): Record<string, string> => fileAuthHeaders;
 
 // `watch` syncs these dirs plus the config file (server needs cron config).
 const SYNC_DIRS = SCAFFOLD_DIRS;
@@ -29,7 +65,15 @@ type Config = { endpoint: string; site: string };
 // --- init ------------------------------------------------------------------
 
 async function init() {
-  requireToken();
+  const creds = await loadCreds();
+  const adminToken = resolveAdminToken(creds);
+  if (!adminToken) {
+    console.error(
+      "An admin token is required to create a site. Set SINGLEPAGE_TOKEN (e.g. in a .env file) and retry.",
+    );
+    process.exit(1);
+  }
+
   // Reuse a previously saved endpoint as the default, if present.
   let prev: { endpoint?: string } = {};
   try {
@@ -52,7 +96,7 @@ async function init() {
   try {
     res = await fetch(`${endpoint}/api/sites`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders() },
+      headers: { "content-type": "application/json", ...bearerHeaders(adminToken) },
       body: JSON.stringify({ name: dirName }),
     });
   } catch (err) {
@@ -61,7 +105,7 @@ async function init() {
   }
 
   if (res.status === 401) {
-    console.error("Unauthorized — set SINGLEPAGE_TOKEN to match the server's token.");
+    console.error("Unauthorized — the admin token (SINGLEPAGE_TOKEN) doesn't match the server.");
     process.exit(1);
   }
   if (!res.ok) {
@@ -69,9 +113,11 @@ async function init() {
     process.exit(1);
   }
 
-  const site = (await res.json()) as { name: string; url: string };
+  const site = (await res.json()) as { name: string; url: string; deployKey: string };
   const config = { endpoint, site: site.name, cron: {} as Record<string, string> };
   await Bun.write(CONFIG, JSON.stringify(config, null, 2) + "\n");
+  // Persist both secrets locally (gitignored, never synced).
+  await saveCreds({ adminToken, deployKey: site.deployKey });
 
   // Scaffold local project directories (idempotent).
   for (const dir of SCAFFOLD_DIRS) {
@@ -79,9 +125,49 @@ async function init() {
   }
 
   console.log(`\n✓ Created site "${site.name}"`);
-  console.log(`  URL:    ${site.url}`);
-  console.log(`  Config: ./${CONFIG}`);
-  console.log(`  Dirs:   ${SCAFFOLD_DIRS.map((d) => `${d}/`).join("  ")}`);
+  console.log(`  URL:         ${site.url}`);
+  console.log(`  Config:      ./${CONFIG}`);
+  console.log(`  Credentials: ./${CREDS} (gitignored — keep it secret)`);
+  console.log(`  Dirs:        ${SCAFFOLD_DIRS.map((d) => `${d}/`).join("  ")}`);
+}
+
+// --- rotate-key -------------------------------------------------------------
+
+async function rotateKey() {
+  const cfg = await loadConfig();
+  const creds = await loadCreds();
+  const adminToken = resolveAdminToken(creds);
+  if (!adminToken) {
+    console.error(
+      "An admin token is required to rotate a deploy key. Set SINGLEPAGE_TOKEN and retry.",
+    );
+    process.exit(1);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.endpoint}/api/sites/${encodeURIComponent(cfg.site)}/deploy-key`, {
+      method: "POST",
+      headers: bearerHeaders(adminToken),
+    });
+  } catch (err) {
+    console.error(`Could not reach ${cfg.endpoint}: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
+  if (res.status === 401) {
+    console.error("Unauthorized — the admin token (SINGLEPAGE_TOKEN) doesn't match the server.");
+    process.exit(1);
+  }
+  if (!res.ok) {
+    console.error(`Server error ${res.status}: ${await res.text()}`);
+    process.exit(1);
+  }
+
+  const { deployKey } = (await res.json()) as { deployKey: string };
+  await saveCreds({ ...creds, adminToken, deployKey });
+  console.log(`\n✓ Rotated deploy key for "${cfg.site}".`);
+  console.log(`  Saved to ./${CREDS}. The previous key no longer works.`);
 }
 
 // --- shared helpers ---------------------------------------------------------
@@ -185,8 +271,15 @@ async function snapshotFiles(): Promise<Map<string, string>> {
 // --- watch ------------------------------------------------------------------
 
 async function watch() {
-  requireToken();
   const cfg = await loadConfig();
+  const deployKey = resolveDeployKey(await loadCreds());
+  if (!deployKey) {
+    console.error(
+      `No deploy key found. Run \`singlepage init\` (new site) or \`singlepage rotate-key\` (existing site) to issue one.`,
+    );
+    process.exit(1);
+  }
+  fileAuthHeaders = bearerHeaders(deployKey);
   const sem = makeSemaphore(MAX_CONCURRENT);
 
   // 1) Initial full upload. The snapshot is the post-upload baseline, so the
@@ -299,7 +392,9 @@ if (cmd === "init") {
   await init();
 } else if (cmd === "watch") {
   await watch();
+} else if (cmd === "rotate-key") {
+  await rotateKey();
 } else {
-  console.log("Usage: singlepage <init|watch>");
+  console.log("Usage: singlepage <init|watch|rotate-key>");
   process.exit(cmd ? 1 : 0);
 }

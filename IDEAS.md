@@ -5,35 +5,36 @@ A running list of things we want to improve. Each entry notes how it works today
 
 ---
 
-## 1. Per-site deploy keys
+## 1. Per-site deploy keys — ✅ done
 
-**Today.** There is exactly one secret: `SINGLEPAGE_TOKEN`, a single shared
-bearer token that gates the entire management/write API (`api.ts`, constant-time
-check in `authorized`). Anyone holding it can write to **any** site —
-`PUT/DELETE /api/sites/<name>/files` for any `<name>` — as well as create sites.
-There is no isolation between sites: one key rules them all. The CLI (`cli.ts`)
-sends this same global token on every upload.
+**Was.** There was exactly one secret: `SINGLEPAGE_TOKEN`, a single shared
+bearer token that gated the entire management/write API. Anyone holding it could
+write to **any** site — `PUT/DELETE /api/sites/<name>/files` for any `<name>` —
+as well as create sites. No isolation: one key ruled them all.
 
-**The problem.** We want a **per-site key** so that only someone holding *that
-site's* key can deploy to it. Holding site A's key must not grant the ability to
-push files to site B.
+**Now (implemented).** `SINGLEPAGE_TOKEN` is now an **admin** token, and each
+site has its own **deploy key** with strict isolation:
 
-**Direction.**
+- `SINGLEPAGE_TOKEN` authorizes only site creation (`POST /api/sites`) and
+  deploy-key rotation (`authorized` in `api.ts`). It can **no longer** write
+  files.
+- File writes (`PUT/DELETE /api/sites/<name>/files`) require *that site's* deploy
+  key (`verifyDeployKey`). Site A's key cannot touch site B.
+- On creation, the server generates a key (`sp_<base64url>`), returns it once,
+  and stores only its **SHA-256 hash** in a backend-only `meta` table inside the
+  site's `data/db.sqlite` (`metaGet`/`metaSet` in `kv.ts`) — never in the
+  client-readable `kv` table, never broadcast. Comparison is constant-time.
+- New `POST /api/sites/<name>/deploy-key` (admin) rotates a site's key; it's also
+  how a site created before deploy keys existed gets its first one. A site with
+  no stored key rejects all writes until an admin issues one.
+- The CLI (`cli.ts`) keeps both the admin token and the site's deploy key in a
+  gitignored `.singlepage.credentials.json` (never synced — `singlepage.json`
+  carries no secrets). It sends the deploy key on uploads, and `singlepage
+  rotate-key` rotates + re-saves.
 
-- On site creation (`POST /api/sites`), generate a unique deploy key for that
-  site and return it to the caller.
-- Scope the file-write endpoints (`PUT/DELETE /api/sites/<name>/files`) to that
-  site's key instead of the global token — a key only authorizes writes to its
-  own site.
-- The CLI stores the site key locally (e.g. in `singlepage.json`, or a separate
-  non-synced secret file) and sends it on uploads to that site.
-- Decide what still gates *site creation* itself — likely keep a global/admin
-  token for "who can create new sites," separate from the per-site deploy keys.
-- Store each site's key with its site (per-site SQLite, or alongside the site
-  config), and compare in constant time as we do now.
-
-Open questions: where the key lives so the CLI can use it without leaking it into
-served/public files; key rotation/revocation; migration for existing sites.
+**Still open.** Authenticating a site's *end-users* (sessions, `ctx.user`) is a
+separate, larger topic — see the note below and #3 for keeping KV data away from
+clients.
 
 > Note: this is only about *who can deploy*. Authenticating a site's end-users
 > (sessions, `ctx.user`, etc.) is a separate, larger topic and not in scope here.

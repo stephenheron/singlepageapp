@@ -22,8 +22,35 @@ export function ensureDb(site: string): Database {
   db.exec(
     "CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL);",
   );
+  // Backend-only key/value store: secrets and server state that must never be
+  // exposed over /__kv or broadcast to clients (e.g. the deploy-key hash).
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+  );
   dbCache.set(site, db);
   return db;
+}
+
+// --- Meta (backend-only) -----------------------------------------------------
+// Unlike kv, the meta table is never reachable from the browser and never
+// broadcast. Use it for server-side secrets and state (see api.ts deploy keys).
+
+/** Backend-only stored value for `key`, or null if absent. */
+export function metaGet(site: string, key: string): string | null {
+  const row = ensureDb(site).query("SELECT value FROM meta WHERE key = ?").get(key) as
+    | { value: string }
+    | null;
+  return row ? row.value : null;
+}
+
+/** Store a backend-only `value` under `key` (no broadcast). */
+export function metaSet(site: string, key: string, value: string): void {
+  ensureDb(site)
+    .query(
+      "INSERT INTO meta (key, value) VALUES (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .run(key, value);
 }
 
 // --- KV helpers --------------------------------------------------------------
