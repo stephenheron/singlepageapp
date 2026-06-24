@@ -25,6 +25,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # kamal secrets — contains raw tokens, never commit
 .kamal/secrets
 
+# editor swap/backup files (can hold copies of secret file contents)
+*.swp
+*.swo
+*~
+
 # dotenv environment variable files
 .env
 .env.development.local
