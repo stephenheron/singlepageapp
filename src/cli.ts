@@ -149,7 +149,7 @@ async function init() {
   } catch {
     // no existing config — that's fine
   }
-  const defaultEndpoint = prev.endpoint ?? "http://localhost:3000";
+  const defaultEndpoint = prev.endpoint ?? "http://localhost";
 
   const answer = prompt(`Single Page API endpoint [${defaultEndpoint}]:`)?.trim();
   const endpoint = (answer || defaultEndpoint).replace(/\/+$/, "");
