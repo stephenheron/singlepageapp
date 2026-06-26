@@ -22,7 +22,7 @@ const AGENTS_END = "<!-- END singlepage -->";
 
 const SKILL_FRONTMATTER = `---
 name: singlepage
-description: Build or edit this Single Page site — static pages in public/, the injected browser client (kv, fn), server functions in server/, cron jobs, and KV visibility classes. Use whenever changing anything under public/, server/, or cron/, or wiring the page to server data.
+description: Build or edit this Single Page site — static pages in public/, the injected browser client (kv, fn, per-visitor user), server functions in server/, cron jobs, KV visibility classes, and anonymous per-user data. Use whenever changing anything under public/, server/, or cron/, wiring the page to server data, or storing per-visitor state.
 ---
 
 `;

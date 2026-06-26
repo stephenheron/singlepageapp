@@ -17,6 +17,7 @@ import {
   serveStatic,
 } from "./sites.ts";
 import { FN_PREFIX, handleServer } from "./server.ts";
+import { resolveIdentity, handleMe } from "./identity.ts";
 import { startCron } from "./cron.ts";
 
 /**
@@ -58,28 +59,43 @@ const server = Bun.serve<WsData>({
 
     // Reserved route: per-site event stream (live reload + kv changes) over a
     // WebSocket. The socket's per-page subscription filter lives on ws.data.
+    // Handled before identity since an upgrade response carries no cookie.
     if (pathname === EVENTS_PATH) {
       if (server.upgrade(req, { data: { site, patterns: new Set() } })) return;
       return new Response("expected websocket", { status: 426 });
+    }
+
+    // Resolve the anonymous visitor identity (signed sp_uid cookie). Minted once
+    // and then carried by the browser; attach the Set-Cookie to whatever response
+    // the route below produces.
+    const identity = resolveIdentity(req, site);
+    const withCookie = (res: Response): Response => {
+      if (identity.setCookie) res.headers.append("set-cookie", identity.setCookie);
+      return res;
+    };
+
+    // Reserved route: per-user identity + per-user kv (scoped to the cookie's id).
+    if (pathname === "/__me" || pathname.startsWith("/__me/")) {
+      return withCookie(await handleMe(req, site, identity.id, pathname));
     }
 
     // Reserved route: per-site key/value store (host-scoped, browser-accessible).
     if (pathname === "/__kv" || pathname.startsWith("/__kv/")) {
       const rawKey = pathname === "/__kv" ? "" : pathname.slice("/__kv/".length);
       const key = rawKey ? decodeURIComponent(rawKey) : null;
-      return handleKv(req, site, key);
+      return withCookie(await handleKv(req, site, key));
     }
 
     // Reserved route: the shared injected client, available on every subdomain.
-    if (pathname === INJECT_PATH) return serveInjectScript();
+    if (pathname === INJECT_PATH) return withCookie(await serveInjectScript());
 
     // Reserved route: per-site server-side function handlers.
     if (pathname === FN_PREFIX || pathname.startsWith(FN_PREFIX + "/")) {
-      return handleServer(req, site, url);
+      return withCookie(await handleServer(req, site, url, identity.id));
     }
 
     // Everything else: a static file from the site's public/ dir.
-    return serveStatic(site, pathname);
+    return withCookie(await serveStatic(site, pathname));
   },
   websocket: {
     open: addClient,

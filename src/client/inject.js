@@ -79,6 +79,49 @@ export const kv = {
   },
 };
 
+// --- per-user identity + store ---------------------------------------------
+// Every visitor gets a stable, server-signed anonymous id (the HttpOnly sp_uid
+// cookie) with no login. Import it as a module:
+//   import { user } from "/__inject.js";
+//   const id = await user.id();          // this visitor's id
+//   await user.kv.set("cart", items);    // private, scoped to this visitor
+//   const cart = await user.kv.get("cart");
+// `user.kv` is private per-visitor data: the server scopes every key to the
+// caller's own namespace via the cookie, so one visitor can never read or write
+// another's. Values are any JSON-serializable data.
+export const user = {
+  // This visitor's id (the cookie is HttpOnly, so the page asks the server).
+  async id() {
+    const res = await fetch("/__me");
+    if (!res.ok) throw new Error(`user.id() → ${res.status}`);
+    return (await res.json()).id;
+  },
+  kv: {
+    async get(key) {
+      const res = await fetch(`/__me/kv/${encodeURIComponent(key)}`);
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`user.kv.get(${key}) → ${res.status}`);
+      return res.json();
+    },
+    async set(key, value) {
+      const res = await fetch(`/__me/kv/${encodeURIComponent(key)}`, {
+        method: "PUT",
+        body: JSON.stringify(value ?? null),
+      });
+      if (!res.ok) throw new Error(`user.kv.set(${key}) → ${res.status}`);
+    },
+    async remove(key) {
+      const res = await fetch(`/__me/kv/${encodeURIComponent(key)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`user.kv.remove(${key}) → ${res.status}`);
+    },
+    async keys() {
+      const res = await fetch("/__me/kv");
+      if (!res.ok) throw new Error(`user.kv.keys() → ${res.status}`);
+      return res.json();
+    },
+  },
+};
+
 // --- server functions ------------------------------------------------------
 // Call this site's server-side handlers (sites/<site>/server/*.js, mounted at
 // /__fn/*). Import it as a module:

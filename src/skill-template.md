@@ -26,12 +26,13 @@ small client module you can import:
 
 ```html
 <script type="module">
-  import { kv, fn } from "/__inject.js";
+  import { kv, fn, user } from "/__inject.js";
   // ...your page code...
 </script>
 ```
 
-It exposes the key/value store (`kv`) and a way to call server functions (`fn`).
+It exposes the key/value store (`kv`), a way to call server functions (`fn`), and
+a per-visitor identity + private store (`user`).
 
 ## Key/value store — `kv`
 
@@ -76,6 +77,38 @@ ctx.kv.setClass("config", "private");                 // reclassify in place
 Rule of thumb: **never put a secret in a `readwrite` or `readonly` key.** Keep it
 in a `private` key and expose only what the page needs through a server function.
 
+## Per-user data — `user`
+
+Every visitor automatically gets a stable, anonymous identity — **no login, no
+sign-up, no UI**. The server mints a signed id on the first request and stores it
+in an `HttpOnly` cookie, so it can't be read or forged by page JS and is safe to
+trust for scoping per-visitor data. The id lives in one browser: it persists
+across visits but does not follow a person across devices, and clearing cookies
+(or a private window) starts a fresh one.
+
+`user.kv` is a private store, separate from the shared `kv` above. Each visitor
+sees **only their own** keys — the server scopes every access to the caller's id,
+so one visitor can never read or write another's data. Values are JSON.
+
+```js
+import { user, fn } from "/__inject.js";
+
+const id = await user.id();           // this visitor's id (string)
+
+await user.kv.set("cart", items);     // private, scoped to this visitor
+await user.kv.get("cart");            // -> items  (null if absent)
+await user.kv.remove("cart");
+await user.kv.keys();                 // -> ["cart", ...]  (this visitor's keys)
+```
+
+Per-user data is request/response — there are **no live `kv.subscribe`-style
+updates** for it (it's private and never broadcast). Use it for carts, drafts,
+preferences, reading progress, "you already voted" flags, and the like.
+
+Server functions see the same identity as `ctx.user` (below), so a handler can
+read and write the caller's private data too — which is how you enforce rules
+like one-vote-per-visitor on the backend rather than trusting the page.
+
 ## Server functions — `server/<name>.js`
 
 Default-export a handler `(req, ctx)`. It is reached at `/__fn/<name>` (and
@@ -100,6 +133,11 @@ await fn.post("users", { email });           // POST /__fn/users  (JSON body)
     response helpers.
   - `ctx.fetch(url, init?)` — outbound HTTP. Loopback/private/link-local hosts are
     blocked (SSRF guard); public hosts only.
+  - `ctx.user` — the calling visitor (see "Per-user data" above), or `null` when
+    there's no caller (cron). `ctx.user.id` is the verified id; `ctx.user.kv` is
+    that visitor's private store (`get/set/remove/keys`), the server-side twin of
+    the page's `user.kv`. The id comes from the signed cookie, so it's trustworthy
+    — scope per-visitor logic to it rather than to anything the page sends.
   - `ctx.console` — `log/info/warn/error`; output is captured as site logs.
 
 The sandbox has **no filesystem and no Node APIs** — only the `ctx` surface above.
@@ -118,7 +156,7 @@ Same handler and `ctx` shape, run on a schedule. Declare the schedule in
 ```
 
 This runs `cron/cleanup.js` at the top of every hour. Use `ctx.kv` for state and
-`ctx.console` for logs.
+`ctx.console` for logs. There's no caller, so `ctx.user` is `null` in cron jobs.
 
 ## Common patterns
 
@@ -129,6 +167,11 @@ This runs `cron/cleanup.js` at the top of every hour. Use `ctx.kv` for state and
   `readonly` key; pages `kv.on` / `kv.subscribe` to it.
 - **User-editable state:** the page writes a `readwrite` key directly with
   `kv.set`.
+- **Per-visitor data (cart, drafts, preferences, progress):** the page uses
+  `user.kv` — private and scoped to that visitor, no login required.
+- **Enforced per-visitor rules (one vote, quotas, "my submissions"):** a server
+  function keys off `ctx.user.id` and reads/writes `ctx.user.kv`, so the rule
+  holds even if the page is tampered with.
 
 ---
 

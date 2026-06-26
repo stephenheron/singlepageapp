@@ -53,8 +53,13 @@ function toResponse(value: unknown): Response {
   });
 }
 
-/** Handle a /__fn/* request for a site. */
-export async function handleServer(req: Request, site: string, url: URL): Promise<Response> {
+/** Handle a /__fn/* request for a site. `userId` is the verified visitor id (see identity.ts). */
+export async function handleServer(
+  req: Request,
+  site: string,
+  url: URL,
+  userId?: string,
+): Promise<Response> {
   if (!existsSync(join(SITES_DIR, site))) {
     return new Response("Unknown site", { status: 404 });
   }
@@ -64,6 +69,7 @@ export async function handleServer(req: Request, site: string, url: URL): Promis
   const result = await runModule(site, relpath, request, {
     deadlineMs: SERVER_DEADLINE_MS,
     source: relpath,
+    user: userId ? { id: userId } : null,
   });
 
   if (result.ok) return toResponse(result.value);

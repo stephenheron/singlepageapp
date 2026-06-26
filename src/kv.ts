@@ -149,10 +149,10 @@ export function kvKeys(site: string): string[] {
   return rows.map((r) => r.key);
 }
 
-/** Client-visible keys (private keys excluded), sorted. */
+/** Client-visible keys (private and reserved user:* keys excluded), sorted. */
 export function kvVisibleKeys(site: string): string[] {
   const rows = ensureDb(site)
-    .query("SELECT key FROM kv WHERE class != 'private' ORDER BY key")
+    .query("SELECT key FROM kv WHERE class != 'private' AND key NOT LIKE 'user:%' ORDER BY key")
     .all() as { key: string }[];
   return rows.map((r) => r.key);
 }
@@ -195,7 +195,15 @@ export async function handleKv(req: Request, site: string, key: string | null): 
 
   if (key === null) {
     if (req.method !== "GET") return json({ error: "method not allowed" }, 405);
-    return json(kvVisibleKeys(site)); // private keys are not enumerable by clients
+    return json(kvVisibleKeys(site)); // private + user:* keys are not enumerable by clients
+  }
+
+  // The user:* namespace is reserved for per-user data, reachable only through the
+  // cookie-scoped /__me/kv boundary (see identity.ts). Hide it from raw /__kv for
+  // every method regardless of class, so a mis-classified per-user key can never
+  // leak or be written here. Respond exactly as if the key is absent.
+  if (key.startsWith("user:")) {
+    return new Response("null", { status: 404, headers: { "content-type": "application/json" } });
   }
 
   // Private keys are invisible to clients: respond exactly as if the key is

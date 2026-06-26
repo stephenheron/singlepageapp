@@ -89,6 +89,40 @@ test("runs a handler and returns its value", async () => {
   if (r.ok) expect(JSON.parse((r.value as any).body).echoed).toBe(5);
 });
 
+test("ctx.user exposes a private per-user store, and is null without a caller", async () => {
+  await Bun.write(
+    join(SITES_DIR, TEST_SITE, "server", "profile.js"),
+    `export default (req, ctx) => {
+      if (!ctx.user) return ctx.json({ user: null });
+      ctx.user.kv.set("name", req.query.name);
+      return ctx.json({ id: ctx.user.id, name: ctx.user.kv.get("name"), keys: ctx.user.kv.keys() });
+    };`,
+  );
+
+  // With a caller: writes land under user:<id>:* as private, scoped to the id.
+  const r = await runModule(
+    TEST_SITE,
+    "server/profile.js",
+    { query: { name: "Ada" } },
+    { deadlineMs: 2000, user: { id: "u123" } },
+  );
+  expect(r.ok).toBe(true);
+  if (r.ok) {
+    const body = JSON.parse((r.value as any).body);
+    expect(body.id).toBe("u123");
+    expect(body.name).toBe("Ada");
+    expect(body.keys).toEqual(["name"]); // namespace stripped, only this user's keys
+  }
+  expect(kvClass(TEST_SITE, "user:u123:name")).toBe("private");
+  expect(kvGet(TEST_SITE, "user:u123:name")).toBe('"Ada"');
+
+  // No caller (e.g. cron): ctx.user is null. Reuses the pooled context, proving
+  // the per-call __user reset works rather than leaking the prior id.
+  const cron = await runModule(TEST_SITE, "server/profile.js", {}, { deadlineMs: 2000 });
+  expect(cron.ok).toBe(true);
+  if (cron.ok) expect(JSON.parse((cron.value as any).body).user).toBeNull();
+});
+
 test("ctx.kv.set forwards a visibility class to the backend", async () => {
   await Bun.write(
     join(SITES_DIR, TEST_SITE, "server", "secret.js"),

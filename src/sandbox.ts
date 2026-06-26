@@ -223,8 +223,23 @@ globalThis.__ctx = (() => {
     headers: Object.assign({ "content-type": ct }, (init && init.headers) || {}),
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
+  // Per-user kv sugar, namespaced under user:<id>:* and always stored "private"
+  // so it never broadcasts or leaks over /__kv. Built from the same host kv calls.
+  // The driver assigns ctx.user per call (null for cron / no caller).
+  globalThis.__makeUser = (id) => {
+    const p = "user:" + id + ":";
+    return {
+      id,
+      kv: {
+        get(key) { const v = __host_kv_get(p + String(key)); return v === null ? null : JSON.parse(v); },
+        set(key, value) { __host_kv_set(p + String(key), JSON.stringify(value === undefined ? null : value), "private"); },
+        remove(key) { __host_kv_remove(p + String(key)); },
+        keys() { return JSON.parse(__host_kv_keys()).filter((k) => k.indexOf(p) === 0).map((k) => k.slice(p.length)); },
+      },
+    };
+  };
   return {
-    kv, console, fetch,
+    kv, console, fetch, user: null,
     json: (data, init) => ({
       status: (init && init.status) || 200,
       headers: Object.assign({ "content-type": "application/json" }, (init && init.headers) || {}),
@@ -238,8 +253,11 @@ globalThis.__ctx = (() => {
 
 // Per-invocation driver: an async IIFE that calls the user's default export and
 // resolves to the JSON-serialized return value. We resolvePromise + pump jobs.
+// __user is set per call (a verified id, or "" for cron / no caller); rebuild
+// ctx.user each call since contexts are pooled and reused across requests.
 const DRIVER = `(async () => {
   const input = JSON.parse(globalThis.__input);
+  globalThis.__ctx.user = globalThis.__user ? globalThis.__makeUser(globalThis.__user) : null;
   const out = await globalThis.__handler(input, globalThis.__ctx);
   return JSON.stringify(out === undefined ? null : out);
 })()`;
@@ -598,7 +616,7 @@ export async function runModule(
   site: string,
   relpath: string,
   input: unknown,
-  opts: { deadlineMs: number; source?: string },
+  opts: { deadlineMs: number; source?: string; user?: { id: string } | null },
 ): Promise<RunResult> {
   const source = opts.source ?? "server";
   const entry = await acquireEntry(site, relpath, source);
@@ -616,6 +634,12 @@ export async function runModule(
     const inputH = context.newString(JSON.stringify(input ?? null));
     context.setProp(context.global, "__input", inputH);
     inputH.dispose();
+
+    // The verified caller id ("" for cron / no caller); the driver builds ctx.user
+    // from it. Set every call so a pooled context never reuses a prior caller's id.
+    const userH = context.newString(opts.user ? opts.user.id : "");
+    context.setProp(context.global, "__user", userH);
+    userH.dispose();
 
     // Throws (e.g. interrupt or syntax error) propagate to the outer catch.
     const resultH = context.unwrapResult(context.evalCode(DRIVER, "driver.js"));
