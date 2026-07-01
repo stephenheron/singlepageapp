@@ -29,6 +29,7 @@ if (!ADMIN_TOKEN) {
 }
 
 const DEPLOY_KEY_META = "deploy_key_hash"; // meta-table key for a site's deploy-key hash
+const DEPLOYED_AT_META = "deployed_at"; // meta-table key for the last file-write time (epoch ms)
 
 /** Extract the bearer token from the Authorization header ("" if absent). */
 function bearer(req: Request): string {
@@ -198,11 +199,13 @@ export async function handleApi(req: Request, url: URL): Promise<Response> {
 
     if (req.method === "PUT") {
       await Bun.write(abs, await req.arrayBuffer()); // creates parent dirs
+      metaSet(name, DEPLOYED_AT_META, String(Date.now()));
       notifyReloadForPath(name, relpath);
       onSourceChange(name, relpath);
       return json({ ok: true, path: relpath });
     }
     await rm(abs, { force: true });
+    metaSet(name, DEPLOYED_AT_META, String(Date.now()));
     notifyReloadForPath(name, relpath);
     onSourceChange(name, relpath);
     return json({ ok: true, path: relpath, deleted: true });
