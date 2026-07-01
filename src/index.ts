@@ -74,7 +74,7 @@ const server = Bun.serve<WsData>({
     // No subdomain -> apex listing page (or an unknown host).
     if (site === null) {
       const hostname = (req.headers.get("host") ?? "").split(":")[0];
-      if (hostname === BASE_DOMAIN || hostname === "") return apexResponse();
+      if (hostname === BASE_DOMAIN || hostname === "") return apexResponse(req);
       return new Response("Unknown host", { status: 404 });
     }
 
