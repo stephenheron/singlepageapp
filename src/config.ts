@@ -37,6 +37,27 @@ export function kvQuota(): { bytes: number; rows: number; userKeys: number } {
   };
 }
 
+/**
+ * Per-client rate limits for the expensive/writable routes, as token-bucket
+ * (requests/second, burst) pairs. `fn` gates /__fn/* (each request drives a
+ * QuickJS run); `write` gates /__kv and /__me/kv mutations. Cheap reads and
+ * static files are not limited. Read at request time so limits are env-tunable
+ * without a rebuild and overridable in tests. Generous enough for normal SPA
+ * use; they only bite a sustained flood.
+ */
+export function rateLimits(): Record<"fn" | "write", { rps: number; burst: number }> {
+  return {
+    fn: {
+      rps: Number(process.env.SINGLEPAGE_RL_FN_RPS ?? 10),
+      burst: Number(process.env.SINGLEPAGE_RL_FN_BURST ?? 30),
+    },
+    write: {
+      rps: Number(process.env.SINGLEPAGE_RL_WRITE_RPS ?? 20),
+      burst: Number(process.env.SINGLEPAGE_RL_WRITE_BURST ?? 60),
+    },
+  };
+}
+
 /** Build a JSON Response. */
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {

@@ -1,4 +1,6 @@
-import { PORT, BASE_DOMAIN, SITES_DIR, MAX_REQUEST_BODY_BYTES } from "./config.ts";
+import { PORT, BASE_DOMAIN, SITES_DIR, MAX_REQUEST_BODY_BYTES, rateLimits } from "./config.ts";
+import { allow, clientIp } from "./ratelimit.ts";
+import type { Server } from "bun";
 import {
   EVENTS_PATH,
   addClient,
@@ -19,6 +21,25 @@ import {
 import { FN_PREFIX, handleServer } from "./server.ts";
 import { resolveIdentity, handleMe } from "./identity.ts";
 import { startCron } from "./cron.ts";
+
+/**
+ * Per-client token-bucket check for the expensive/writable routes. Returns a 429
+ * Response when this client (IP + site) has exhausted `category`'s bucket, else
+ * null to proceed. Keyed per site so one busy site doesn't throttle another.
+ */
+function rateLimited(
+  category: "fn" | "write",
+  req: Request,
+  server: Server<WsData>,
+  site: string,
+): Response | null {
+  const { rps, burst } = rateLimits()[category];
+  if (allow(`${category}:${clientIp(req, server)}:${site}`, rps, burst)) return null;
+  return new Response(JSON.stringify({ error: "rate limited" }), {
+    status: 429,
+    headers: { "content-type": "application/json", "retry-after": "1" },
+  });
+}
 
 /**
  * Subdomain-routed static file server. Each <site>.<BASE_DOMAIN> maps to
@@ -76,13 +97,24 @@ const server = Bun.serve<WsData>({
       return res;
     };
 
+    // Whether this is a mutating request (rate-limited on the write routes below).
+    const isWrite = req.method === "PUT" || req.method === "DELETE";
+
     // Reserved route: per-user identity + per-user kv (scoped to the cookie's id).
     if (pathname === "/__me" || pathname.startsWith("/__me/")) {
+      if (isWrite && pathname.startsWith("/__me/kv")) {
+        const limited = rateLimited("write", req, server, site);
+        if (limited) return withCookie(limited);
+      }
       return withCookie(await handleMe(req, site, identity.id, pathname));
     }
 
     // Reserved route: per-site key/value store (host-scoped, browser-accessible).
     if (pathname === "/__kv" || pathname.startsWith("/__kv/")) {
+      if (isWrite) {
+        const limited = rateLimited("write", req, server, site);
+        if (limited) return withCookie(limited);
+      }
       const rawKey = pathname === "/__kv" ? "" : pathname.slice("/__kv/".length);
       const key = rawKey ? decodeURIComponent(rawKey) : null;
       return withCookie(await handleKv(req, site, key));
@@ -91,8 +123,11 @@ const server = Bun.serve<WsData>({
     // Reserved route: the shared injected client, available on every subdomain.
     if (pathname === INJECT_PATH) return withCookie(await serveInjectScript());
 
-    // Reserved route: per-site server-side function handlers.
+    // Reserved route: per-site server-side function handlers. Each request drives
+    // a QuickJS run, so it's the most expensive route — rate-limit every method.
     if (pathname === FN_PREFIX || pathname.startsWith(FN_PREFIX + "/")) {
+      const limited = rateLimited("fn", req, server, site);
+      if (limited) return withCookie(limited);
       return withCookie(await handleServer(req, site, url, identity.id));
     }
 

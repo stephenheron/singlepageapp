@@ -7,25 +7,18 @@ A running list of things we want to improve. Each entry notes how it works today
 
 ## Abuse & resource limits (shared-host hardening)
 
-The isolation primitives are solid (per-context heap/stack/deadline in
-`sandbox.ts`, SSRF + 5 MB response cap on `ctx.fetch`, hashed deploy keys, signed
-identity, inbound body-size caps, and now per-site storage quotas — see Recently
-shipped). The gap that remains is **request-rate exhaustion by unauthenticated
-visitors on a shared host**: CPU/memory are shared across every tenant, so one
-visitor spraying expensive routes degrades the box for all of them. The item
-below closes that path.
+The shared-host hardening theme is now covered end to end (per-context
+heap/stack/deadline in `sandbox.ts`, SSRF + 5 MB response cap on `ctx.fetch`,
+hashed deploy keys, signed identity, inbound body-size caps, per-site storage
+quotas, and per-client rate limiting — all in Recently shipped). Nothing queued
+here right now; possible follow-ups if abuse patterns show up in practice:
 
-### 1. Rate limiting
-
-No rate limiting exists anywhere. An anonymous visitor can hammer `/__fn/*` (each
-request drives a QuickJS run with a 60 s budget) or spray `/__kv` / `/__me/kv`
-writes. The per-handler pool (`MAX_CONTEXTS_PER_HANDLER = 8`, `sandbox.ts:274`)
-bounds one handler but throttles nothing across requests.
-
-Leaning toward: a cheap in-process token bucket keyed by IP (`x-forwarded-for`,
-since we sit behind Caddy) and/or site, on the expensive/writable routes. Some of
-this could live in the front proxy (`config/Caddyfile`), but an in-process backstop
-is worth keeping because the proxy can't see per-site sandbox cost.
+- **Distributed / shared rate-limit state.** The token bucket is per-process
+  (`ratelimit.ts`), so it resets on redeploy and wouldn't coordinate across
+  multiple app instances. Fine for a single droplet; revisit if we scale out.
+- **Edge rate limiting.** A coarse per-IP cap in Caddy (needs the third-party
+  `caddy-ratelimit` module + a custom image) would reject floods before they
+  reach Bun at all — defense-in-depth on top of the in-process limiter.
 
 ## Capability primitives (batteries for real apps)
 
@@ -65,6 +58,12 @@ global sandbox budget (see abuse-limits #1, rate limiting). Pairs naturally with
 
 <!--
 Recently shipped:
+- Per-client rate limiting: an in-process token bucket (`ratelimit.ts`, limits in
+  `rateLimits()`, env-overridable) gates the expensive/writable routes — every
+  `/__fn/*` request and `/__kv` + `/__me/kv` mutations — keyed by client IP + site,
+  returning 429 on a sustained flood. Client IP is the rightmost non-internal
+  `X-Forwarded-For` entry (spoof-resistant behind Caddy/kamal-proxy). See
+  index.ts, ratelimit.ts, config.ts, ratelimit.test.ts.
 - Per-site storage quota: `kvSet` enforces per-site byte + key caps and a per-user
   `user:<id>:*` key cap (`kvQuota()` in config.ts, env-overridable), throwing
   `KvQuotaError` → 507 at the `/__kv` and `/__me/kv` boundaries. Byte/row totals
