@@ -8,14 +8,24 @@
 
 service: single-page
 
-# Image repository: registry.digitalocean.com/<registry-name>/<image>.
-# Registry name is "single-page-app"; the app image is "single-page".
-image: single-page-app/single-page
+# Image repository path (WITHOUT the registry host — that's `registry.server`
+# below). This is registry/provider-specific, so it's read from the shell env:
+#   DigitalOcean  ->  <registry-name>/single-page
+#   Docker Hub    ->  <dockerhub-user>/single-page
+#   GHCR          ->  <org>/single-page   (with SINGLEPAGE_REGISTRY_SERVER=ghcr.io)
+image: <%= ENV.fetch("SINGLEPAGE_IMAGE") %>
 
-# Deploy to this server.
+# Deploy to this server. The IP is kept out of this committed file: it's read
+# from SINGLEPAGE_SERVER_IP in the shell env (ERB), stored in .kamal/secrets.
+# Source that file before running kamal (see the header in .kamal/secrets).
 servers:
   web:
-    - 138.68.181.120
+    - <%= ENV.fetch("SINGLEPAGE_SERVER_IP") %>
+
+# SSH login user for the server + builder. Kept out of this committed file too;
+# read from SINGLEPAGE_SERVER_USER (defaults to "root" if unset).
+ssh:
+  user: <%= ENV.fetch("SINGLEPAGE_SERVER_USER", "root") %>
 
 # --- Proxy ------------------------------------------------------------------
 # ssl:false because Caddy terminates TLS in front. kamal-proxy listens on 8080
@@ -30,11 +40,13 @@ proxy:
     https_port: 8443
 
 # --- Registry ---------------------------------------------------------------
-# DigitalOcean Container Registry. Auth uses a DO API token (read/write) as BOTH
-# username and password — set both env vars to that token (see .kamal/secrets).
-# Kamal logs in on the builder + server for you.
+# Any OCI registry works — set the host + credentials via env. Kamal logs in on
+# the builder + server for you. Examples for `SINGLEPAGE_REGISTRY_SERVER`:
+#   registry.digitalocean.com | ghcr.io | docker.io | <account>.dkr.ecr.<region>.amazonaws.com
+# Credentials come from KAMAL_REGISTRY_USERNAME / KAMAL_REGISTRY_PASSWORD in
+# .kamal/secrets. (For DigitalOcean, both are the same read/write API token.)
 registry:
-  server: registry.digitalocean.com
+  server: <%= ENV.fetch("SINGLEPAGE_REGISTRY_SERVER") %>
   username:
     - KAMAL_REGISTRY_USERNAME
   password:
@@ -45,15 +57,16 @@ registry:
 # the image is never built on your Mac — you only need the docker CLI + buildx
 # plugin locally (`brew install docker docker-buildx`), not a Docker engine/VM.
 builder:
-  arch: amd64
-  remote: ssh://root@138.68.181.120
+  arch: <%= ENV.fetch("SINGLEPAGE_SERVER_ARCH", "amd64") %>
+  remote: ssh://<%= ENV.fetch("SINGLEPAGE_SERVER_USER", "root") %>@<%= ENV.fetch("SINGLEPAGE_SERVER_IP") %>
   local: false
 
 # --- Environment ------------------------------------------------------------
 env:
   clear:
-    # Apex domain; sites are served as <site>.BASE_DOMAIN.
-    BASE_DOMAIN: singlepageapp.co
+    # Apex domain; sites are served as <site>.BASE_DOMAIN. Your domain, so it's
+    # read from the shell env (see .kamal/secrets).
+    BASE_DOMAIN: <%= ENV.fetch("BASE_DOMAIN") %>
     PORT: 3000
   secret:
     - SINGLEPAGE_APP_TOKEN
@@ -70,11 +83,12 @@ volumes:
 accessories:
   caddy:
     image: caddy:2
-    host: 138.68.181.120
+    host: <%= ENV.fetch("SINGLEPAGE_SERVER_IP") %>
     network: host
     env:
       clear:
-        ACME_EMAIL: stephen.heron@gmail.com
+        # Let's Encrypt account email — read from the shell env (see .kamal/secrets).
+        ACME_EMAIL: <%= ENV.fetch("ACME_EMAIL") %>
     files:
       - config/Caddyfile:/etc/caddy/Caddyfile
     directories:

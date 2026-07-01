@@ -228,6 +228,36 @@ Bun auto-loads `.env`, so these can live in a local `.env` file.
 | `bun run build:cli` | Compile the `singlepage` CLI to a standalone binary. |
 | `bun test` | Run the test suite. |
 
+### Deploying (self-hosting)
+
+Deploys use [Kamal](https://kamal-deploy.org). `config/deploy.yml` is fully
+env-driven — nothing about the host, registry, or domain is hardcoded — so a
+fresh checkout only needs your own values. Any Docker host + OCI registry works
+(DigitalOcean, Docker Hub, GHCR, ECR, …).
+
+First time:
+
+```sh
+cp .kamal/secrets.sample .kamal/secrets   # gitignored; fill in your values
+set -a; source .kamal/secrets; set +a     # load config into your shell env
+kamal setup                               # provisions + first deploy
+```
+
+Every deploy after that (the `source` step is needed once per new shell):
+
+```sh
+set -a; source .kamal/secrets; set +a
+kamal deploy
+```
+
+`.kamal/secrets` holds two kinds of keys: registry/app secrets that Kamal
+resolves itself, and deployment config that `deploy.yml` reads via ERB from the
+shell env (hence the `source` step). Required: `SINGLEPAGE_REGISTRY_SERVER`,
+`SINGLEPAGE_IMAGE`, `SINGLEPAGE_SERVER_IP`, `BASE_DOMAIN`, `ACME_EMAIL`,
+`KAMAL_REGISTRY_USERNAME`/`PASSWORD`, `SINGLEPAGE_APP_TOKEN`. Optional:
+`SINGLEPAGE_SERVER_USER` (default `root`), `SINGLEPAGE_SERVER_ARCH` (default
+`amd64`). See `.kamal/secrets.sample` for the annotated list.
+
 ---
 
 Created with `bun init`; see `IDEAS.md` for the roadmap and design notes.
