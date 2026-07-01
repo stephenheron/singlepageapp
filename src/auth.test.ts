@@ -75,6 +75,32 @@ test("file writes require the site's deploy key, not the admin token", async () 
   expect(((await ok.json()) as { ok: boolean }).ok).toBe(true);
 });
 
+test(".env uploads to the site root (never public/), other root files are rejected", async () => {
+  const { name, deployKey } = await createSite("auth-env");
+
+  // .env is allowed, gated by the deploy key, and lands at the site root — not
+  // under public/, so it is never served.
+  const put = await call("PUT", `/api/sites/${name}/files?path=.env`, {
+    token: deployKey,
+    body: "API_KEY=secret\n",
+  });
+  expect(put.status).toBe(200);
+  expect(await Bun.file(join(SITES_DIR, name, ".env")).text()).toBe("API_KEY=secret\n");
+  expect(await Bun.file(join(SITES_DIR, name, "public", ".env")).exists()).toBe(false);
+
+  // The admin token can't write it (file writes need the site's deploy key).
+  expect(
+    (await call("PUT", `/api/sites/${name}/files?path=.env`, { token: ADMIN, body: "X=1" })).status,
+  ).toBe(401);
+
+  // Arbitrary site-root files remain disallowed (only public/server/cron + the
+  // singlepage.json / .env allow-list can be written).
+  expect(
+    (await call("PUT", `/api/sites/${name}/files?path=secrets.txt`, { token: deployKey, body: "x" }))
+      .status,
+  ).toBe(400);
+});
+
 test("a deploy key is scoped to its own site", async () => {
   const a = await createSite("auth-scope-a");
   const b = await createSite("auth-scope-b");

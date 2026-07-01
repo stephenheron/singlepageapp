@@ -123,6 +123,43 @@ test("ctx.user exposes a private per-user store, and is null without a caller", 
   if (cron.ok) expect(JSON.parse((cron.value as any).body).user).toBeNull();
 });
 
+test("ctx.env exposes the site's .env and re-reads it per call", async () => {
+  const envPath = join(SITES_DIR, TEST_SITE, ".env");
+  await Bun.write(envPath, "API_KEY=first\nOTHER=x\n");
+  await Bun.write(
+    join(SITES_DIR, TEST_SITE, "server", "env.js"),
+    `export default (req, ctx) => ctx.json({ key: ctx.env.API_KEY, missing: ctx.env.NOPE ?? null });`,
+  );
+
+  const r = await runModule(TEST_SITE, "server/env.js", {}, { deadlineMs: 2000 });
+  expect(r.ok).toBe(true);
+  if (r.ok) {
+    const body = JSON.parse((r.value as any).body);
+    expect(body.key).toBe("first");
+    expect(body.missing).toBeNull();
+  }
+
+  // Rewrite .env; a pooled context must serve the fresh value, not a baked one.
+  await Bun.write(envPath, "API_KEY=second\n");
+  const r2 = await runModule(TEST_SITE, "server/env.js", {}, { deadlineMs: 2000 });
+  expect(r2.ok).toBe(true);
+  if (r2.ok) expect(JSON.parse((r2.value as any).body).key).toBe("second");
+});
+
+test("ctx.env is frozen so handlers can't mutate the shared context", async () => {
+  await Bun.write(join(SITES_DIR, TEST_SITE, ".env"), "A=1\n");
+  await Bun.write(
+    join(SITES_DIR, TEST_SITE, "server", "freeze.js"),
+    `export default (req, ctx) => {
+      try { ctx.env.A = "mutated"; } catch (e) {}
+      return ctx.json({ a: ctx.env.A });
+    };`,
+  );
+  const r = await runModule(TEST_SITE, "server/freeze.js", {}, { deadlineMs: 2000 });
+  expect(r.ok).toBe(true);
+  if (r.ok) expect(JSON.parse((r.value as any).body).a).toBe("1");
+});
+
 test("ctx.kv.set forwards a visibility class to the backend", async () => {
   await Bun.write(
     join(SITES_DIR, TEST_SITE, "server", "secret.js"),

@@ -121,9 +121,12 @@ const bearerHeaders = (token: string): Record<string, string> => ({
 let fileAuthHeaders: Record<string, string> = {};
 const authHeaders = (): Record<string, string> => fileAuthHeaders;
 
-// `watch` syncs these dirs plus the config file (server needs cron config).
+// `watch` syncs these dirs plus a few site-root files: the config (server needs
+// cron config) and `.env` (the site's secrets, exposed to server/cron as
+// ctx.env; stored server-side outside public/, so never served).
 const SYNC_DIRS = SCAFFOLD_DIRS;
-const EXTRA_FILES = [CONFIG];
+const ENV_FILE = ".env";
+const EXTRA_FILES = [CONFIG, ENV_FILE];
 const DEBOUNCE_MS = 150;   // collapse a burst of fs events into one reconcile
 const RECONCILE_MS = 2000; // periodic safety-net rescan
 const MAX_CONCURRENT = 8;
@@ -192,6 +195,19 @@ async function init() {
     await mkdir(dir, { recursive: true });
   }
 
+  // Seed a gitignored `.env` for site secrets (API keys etc.), exposed to
+  // server/cron code as ctx.env. Never clobber an existing one.
+  await ensureGitignored(ENV_FILE);
+  if (!(await Bun.file(ENV_FILE).exists())) {
+    await Bun.write(
+      ENV_FILE,
+      "# Site secrets for server/ and cron/ code, read as ctx.env.NAME\n" +
+        "# Synced to the server (never served to the browser). Keep only\n" +
+        "# site secrets here — NOT SINGLEPAGE_* operator tokens.\n" +
+        "# EXAMPLE_API_KEY=your-key-here\n",
+    );
+  }
+
   // Install the agent guide (Claude skill + neutral AGENTS.md) for this site.
   await writeAgentDocs({ site: site.name, url: site.url, endpoint });
 
@@ -199,6 +215,7 @@ async function init() {
   console.log(`  URL:         ${site.url}`);
   console.log(`  Config:      ./${CONFIG}`);
   console.log(`  Credentials: ./${CREDS} (gitignored — keep it secret)`);
+  console.log(`  Secrets:     ./${ENV_FILE} (gitignored — site secrets, read as ctx.env)`);
   console.log(`  Dirs:        ${SCAFFOLD_DIRS.map((d) => `${d}/`).join("  ")}`);
   console.log(`  Agent guide: ./${SKILL_FILE}  +  ./${AGENTS_FILE}`);
 }
@@ -279,7 +296,38 @@ function fileUrl({ endpoint, site }: Config, relpath: string): string {
   return `${endpoint}/api/sites/${encodeURIComponent(site)}/files?path=${encodeURIComponent(relpath)}`;
 }
 
+/**
+ * The site `.env` is uploaded and exposed to server/cron code as ctx.env, so
+ * operator-only vars (the admin token, deploy key — anything the server reads
+ * from its OWN environment) must never live there. Refuse to sync a `.env` that
+ * carries a SINGLEPAGE_* var and point the user at the credentials file instead.
+ * Returns true (with a warning) when the file should be skipped.
+ */
+async function envSyncBlocked(relpath: string): Promise<boolean> {
+  if (relpath !== ENV_FILE) return false;
+  let text: string;
+  try {
+    text = await Bun.file(relpath).text();
+  } catch {
+    return false; // vanished — let the normal delete path handle it
+  }
+  const bad = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(export\s+)?SINGLEPAGE_[A-Za-z0-9_]*\s*=/.test(l))
+    .map((l) => l.replace(/^export\s+/, "").split("=")[0]!.trim());
+  if (bad.length === 0) return false;
+  console.error(
+    `  ✗ refusing to sync ${ENV_FILE} — it defines operator vars that would leak to the site:\n` +
+      bad.map((n) => `      ${n}`).join("\n") +
+      `\n    Move SINGLEPAGE_* out of ${ENV_FILE} (use ./${CREDS} or your shell env); keep only site secrets in ${ENV_FILE}.`,
+  );
+  return true;
+}
+
 async function uploadPath(cfg: Config, relpath: string): Promise<boolean> {
+  // Skip (but treat as reconciled) an unsafe .env so we don't retry-spam.
+  if (await envSyncBlocked(relpath)) return true;
   try {
     const res = await fetch(fileUrl(cfg, relpath), {
       method: "PUT",
@@ -438,10 +486,12 @@ async function watch() {
       console.error(`Cannot watch ${dir}/: ${(err as Error).message}`);
     }
   }
-  try {
-    watchers.push(fsWatch(CONFIG, () => triggerReconcile()));
-  } catch {
-    // config file may not exist yet — ignore
+  for (const f of EXTRA_FILES) {
+    try {
+      watchers.push(fsWatch(f, () => triggerReconcile()));
+    } catch {
+      // the file may not exist yet — reconcile's rescan will pick it up later
+    }
   }
 
   // Periodic safety-net rescan in case an fs event never arrives.
@@ -454,7 +504,9 @@ async function watch() {
     process.exit(0);
   });
 
-  console.log(`\nWatching ${SYNC_DIRS.map((d) => `${d}/`).join(", ")} and ${CONFIG} — Ctrl-C to stop.`);
+  console.log(
+    `\nWatching ${SYNC_DIRS.map((d) => `${d}/`).join(", ")} and ${EXTRA_FILES.join(", ")} — Ctrl-C to stop.`,
+  );
 }
 
 // --- dispatch ---------------------------------------------------------------

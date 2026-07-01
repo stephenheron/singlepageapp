@@ -139,8 +139,41 @@ await fn.post("users", { email });           // POST /__fn/users  (JSON body)
     the page's `user.kv`. The id comes from the signed cookie, so it's trustworthy
     — scope per-visitor logic to it rather than to anything the page sends.
   - `ctx.console` — `log/info/warn/error`; output is captured as site logs.
+  - `ctx.env` — the site's secrets as a read-only object of strings, e.g.
+    `ctx.env.OPENAI_API_KEY`. Populated from a `.env` file at the project root
+    (see "Secrets" below). Absent keys are `undefined`. Backend-only — never
+    exposed to the browser.
 
 The sandbox has **no filesystem and no Node APIs** — only the `ctx` surface above.
+
+## Secrets — `.env`
+
+API keys and other secrets go in a `.env` file at the project root (created,
+gitignored, by `singlepage init`). It's a normal dotenv file:
+
+```
+OPENAI_API_KEY=sk-...
+NASA_KEY=abcd1234
+```
+
+It's synced to the server (kept out of `public/`, so **never** served to the
+browser) and exposed to `server/` and `cron/` code as `ctx.env`:
+
+```js
+// server/ask.js
+export default async (req, ctx) => {
+  const res = await ctx.fetch("https://api.openai.com/v1/...", {
+    headers: { authorization: `Bearer ${ctx.env.OPENAI_API_KEY}` },
+  });
+  return ctx.json(await res.json());
+};
+```
+
+Edit `.env` and it re-syncs on the next `singlepage watch` pass; the new value
+is picked up on the next function/cron run. Keep only **site** secrets here —
+never `SINGLEPAGE_*` operator tokens (the sync refuses those). Read secrets
+only from server/cron code and return just the safe parts to the page; `.env`
+values must never be echoed into a `readwrite`/`readonly` kv key.
 
 ## Cron — `cron/<name>.js`
 

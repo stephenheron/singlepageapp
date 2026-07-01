@@ -9,6 +9,7 @@ import {
 } from "quickjs-emscripten";
 import { SITES_DIR } from "./config.ts";
 import { kvGet, kvSet, kvRemove, kvKeys, kvSetClass, appendLog, type KvClass } from "./kv.ts";
+import { readSiteEnv } from "./env.ts";
 
 /**
  * The single boundary to the QuickJS WASM sandbox. Nothing else in the codebase
@@ -239,7 +240,7 @@ globalThis.__ctx = (() => {
     };
   };
   return {
-    kv, console, fetch, user: null,
+    kv, console, fetch, user: null, env: {},
     json: (data, init) => ({
       status: (init && init.status) || 200,
       headers: Object.assign({ "content-type": "application/json" }, (init && init.headers) || {}),
@@ -255,9 +256,13 @@ globalThis.__ctx = (() => {
 // resolves to the JSON-serialized return value. We resolvePromise + pump jobs.
 // __user is set per call (a verified id, or "" for cron / no caller); rebuild
 // ctx.user each call since contexts are pooled and reused across requests.
+// __env (the site's .env, a JSON object) is likewise re-read per call so an
+// updated .env takes effect without rebuilding the context; frozen so handler
+// code can't mutate the shared ctx object between calls.
 const DRIVER = `(async () => {
   const input = JSON.parse(globalThis.__input);
   globalThis.__ctx.user = globalThis.__user ? globalThis.__makeUser(globalThis.__user) : null;
+  globalThis.__ctx.env = Object.freeze(JSON.parse(globalThis.__env));
   const out = await globalThis.__handler(input, globalThis.__ctx);
   return JSON.stringify(out === undefined ? null : out);
 })()`;
@@ -640,6 +645,12 @@ export async function runModule(
     const userH = context.newString(opts.user ? opts.user.id : "");
     context.setProp(context.global, "__user", userH);
     userH.dispose();
+
+    // The site's .env, parsed fresh (mtime-cached) each call so ctx.env reflects
+    // the latest uploaded values and a pooled context never serves stale env.
+    const envH = context.newString(JSON.stringify(readSiteEnv(site)));
+    context.setProp(context.global, "__env", envH);
+    envH.dispose();
 
     // Throws (e.g. interrupt or syntax error) propagate to the outer catch.
     const resultH = context.unwrapResult(context.evalCode(DRIVER, "driver.js"));

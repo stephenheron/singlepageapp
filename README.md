@@ -64,8 +64,8 @@ live-reload (CSS hot-swaps without a full reload).
 
 | Command | What it does |
 | --- | --- |
-| `singlepage init` | Create a site (admin token), scaffold `public/ server/ cron/`, save config + credentials, and install the agent guide (`SKILL.md` + `AGENTS.md`). |
-| `singlepage watch` | Initial upload, then watch `public/ server/ cron/` + `singlepage.json` and sync changes (deploy key). |
+| `singlepage init` | Create a site (admin token), scaffold `public/ server/ cron/` + a gitignored `.env`, save config + credentials, and install the agent guide (`SKILL.md` + `AGENTS.md`). |
+| `singlepage watch` | Initial upload, then watch `public/ server/ cron/` + `singlepage.json` + `.env` and sync changes (deploy key). |
 | `singlepage rotate-key` | Issue a new deploy key for the site; the old one stops working. Also how a pre-deploy-key site gets its first key. |
 
 ## Architecture
@@ -96,9 +96,9 @@ export default (req, ctx) => ctx.json({ hello: req.query.name ?? "world" });
 ```
 
 - **`req`** — `{ method, path, query, headers, body }`.
-- **`ctx`** — `{ kv, console, fetch, json, text, html }`. `ctx.fetch` is
-  guarded against SSRF (loopback/private/link-local hosts blocked); `console`
-  output is captured as logs.
+- **`ctx`** — `{ kv, console, fetch, json, text, html, user, env }`. `ctx.fetch`
+  is guarded against SSRF (loopback/private/link-local hosts blocked); `console`
+  output is captured as logs. `ctx.env` exposes the site's secrets (below).
 
 Cron jobs are `cron/<name>.js`, scheduled from the `cron` map in
 `singlepage.json` (`{ "<name>": "<cron expression>" }`) and run with the same
@@ -133,6 +133,23 @@ ctx.kv.setClass("count", "private");                  // reclassify in place
 A plain `set` with no class preserves an existing key's class; new keys default
 to `readwrite`. Client writes over `/__kv` never set a class. (Implemented in
 `kv.ts`; the `class` column is migrated into existing databases on open.)
+
+### Secrets (`.env` → `ctx.env`)
+
+API keys and other secrets live in a `.env` file at the project root, created
+(and gitignored) by `singlepage init`. It's a standard dotenv file:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+`watch` syncs it to the server — stored at the site root, **outside `public/`**,
+so it is never served or broadcast — and it's exposed to `server/` and `cron/`
+code as a read-only object `ctx.env` (`ctx.env.OPENAI_API_KEY`). Values are
+re-read per run, so an edited/re-synced `.env` takes effect on the next call
+without a restart. Keep only **site** secrets here; `SINGLEPAGE_*` operator
+tokens must not go in `.env` (the CLI refuses to sync a `.env` containing them,
+since it would leak them into site-readable `ctx.env`). Implemented in `env.ts`.
 
 ### Client (`/__inject.js`)
 
@@ -173,7 +190,7 @@ Two secret types, strictly scoped:
 | --- | --- | --- |
 | `POST /api/sites` | admin token | Create a site `{ name }`; returns `{ name, url, deployKey }` (key shown once). |
 | `POST /api/sites/<name>/deploy-key` | admin token | Rotate (or first-issue) the site's deploy key. |
-| `PUT /api/sites/<name>/files?path=<rel>` | deploy key | Upload a file under `public/`, `server/`, `cron/`, or `singlepage.json`. |
+| `PUT /api/sites/<name>/files?path=<rel>` | deploy key | Upload a file under `public/`, `server/`, `cron/`, `singlepage.json`, or `.env`. |
 | `DELETE /api/sites/<name>/files?path=<rel>` | deploy key | Delete a file. |
 
 All auth is `Authorization: Bearer <token>`. Upload paths are allow-listed and

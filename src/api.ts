@@ -120,8 +120,12 @@ function starterHtml(name: string): string {
 `;
 }
 
-// Top-level dirs (plus singlepage.json) the upload API is allowed to write.
+// Top-level dirs the upload API is allowed to write.
 const WRITABLE_ROOTS = ["public/", "server/", "cron/"];
+// Exact site-root files the upload API allows (never a directory prefix). `.env`
+// holds the site's secrets: it lives outside public/ so it is never served, and
+// is exposed to server/cron code as ctx.env. singlepage.json carries cron config.
+const WRITABLE_FILES = ["singlepage.json", ".env"];
 
 /**
  * Resolve a site-relative upload path to an absolute path inside the site dir.
@@ -131,7 +135,7 @@ const WRITABLE_ROOTS = ["public/", "server/", "cron/"];
 function resolveSiteFile(name: string, relpath: string): string | null {
   const rel = relpath.replace(/^\/+/, "");
   const allowed =
-    rel === "singlepage.json" || WRITABLE_ROOTS.some((r) => rel.startsWith(r));
+    WRITABLE_FILES.includes(rel) || WRITABLE_ROOTS.some((r) => rel.startsWith(r));
   if (!allowed) return null;
 
   const siteRoot = join(SITES_DIR, name);
