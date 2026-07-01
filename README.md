@@ -188,6 +188,35 @@ guarded against traversal.
 | `PORT` | `3000` | Listen port. |
 | `BASE_DOMAIN` | `localhost` | Apex domain; sites are `<site>.<BASE_DOMAIN>`. |
 
+All of the following are **optional** — sensible defaults ship in the code, and
+these only need setting to tune the shared-host limits.
+
+**Body-size cap** (host-memory backstop; see `Bun.serve`)
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `SINGLEPAGE_MAX_BODY_BYTES` | `26214400` (25 MB) | Max request body for any route; must clear your largest deploy asset. |
+
+**Per-site storage quota** (enforced in `kvSet`)
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `SINGLEPAGE_MAX_SITE_KV_BYTES` | `5242880` (5 MB) | Max total KV bytes per site. |
+| `SINGLEPAGE_MAX_SITE_KV_ROWS` | `10000` | Max total KV keys per site. |
+| `SINGLEPAGE_MAX_USER_KV_KEYS` | `100` | Max keys per anonymous user (`user:<id>:*`). |
+
+**Per-client rate limits** (token bucket on the expensive/writable routes)
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `SINGLEPAGE_RL_FN_RPS` | `10` | Sustained requests/sec per client for `/__fn/*`. |
+| `SINGLEPAGE_RL_FN_BURST` | `30` | Burst allowance for `/__fn/*`. |
+| `SINGLEPAGE_RL_WRITE_RPS` | `20` | Sustained requests/sec per client for `/__kv` + `/__me/kv` writes. |
+| `SINGLEPAGE_RL_WRITE_BURST` | `60` | Burst allowance for those writes. |
+
+The per-value KV cap (256 KB) is a fixed constant (`MAX_KV_VALUE_BYTES`), not
+env-tunable.
+
 Bun auto-loads `.env`, so these can live in a local `.env` file.
 
 ### Scripts
