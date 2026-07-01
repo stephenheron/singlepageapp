@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHmac, createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { SITES_DIR, json, MAX_KV_VALUE_BYTES } from "./config.ts";
-import { kvGet, kvSet, kvRemove, kvKeys, readLimitedBody } from "./kv.ts";
+import { kvGet, kvSet, kvRemove, kvKeys, readLimitedBody, KvQuotaError } from "./kv.ts";
 
 /**
  * Anonymous end-user identity. Every visitor gets a stable, *unforgeable* id with
@@ -187,7 +187,12 @@ export async function handleMe(
       const body = await readLimitedBody(req, MAX_KV_VALUE_BYTES);
       if (body instanceof Response) return body;
       // Stored "private": per-user values never broadcast and never leak over /__kv.
-      kvSet(site, fullKey, body, "private");
+      try {
+        kvSet(site, fullKey, body, "private");
+      } catch (e) {
+        if (e instanceof KvQuotaError) return json({ error: "storage quota exceeded" }, 507);
+        throw e;
+      }
       return json({ ok: true });
     }
     if (req.method === "DELETE") {

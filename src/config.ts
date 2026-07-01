@@ -22,6 +22,21 @@ export const MAX_REQUEST_BODY_BYTES = Number(
 );
 export const MAX_KV_VALUE_BYTES = 256 * 1024;
 
+/**
+ * Per-site kv storage quota: total bytes and total keys across a site's kv table,
+ * plus a per-user cap on the reserved `user:<id>:*` namespace so a flood of
+ * anonymous identities can't grow the DB. Read at write time (not import) so the
+ * limits are env-tunable without a rebuild and overridable in tests. Coarse
+ * safety caps sized for small single-page sites.
+ */
+export function kvQuota(): { bytes: number; rows: number; userKeys: number } {
+  return {
+    bytes: Number(process.env.SINGLEPAGE_MAX_SITE_KV_BYTES ?? 5 * 1024 * 1024),
+    rows: Number(process.env.SINGLEPAGE_MAX_SITE_KV_ROWS ?? 10_000),
+    userKeys: Number(process.env.SINGLEPAGE_MAX_USER_KV_KEYS ?? 100),
+  };
+}
+
 /** Build a JSON Response. */
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {

@@ -1,8 +1,22 @@
 import { join } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
 import { Database } from "bun:sqlite";
-import { SITES_DIR, json, MAX_KV_VALUE_BYTES } from "./config.ts";
+import { SITES_DIR, json, MAX_KV_VALUE_BYTES, kvQuota } from "./config.ts";
 import { broadcast, broadcastKv } from "./events.ts";
+
+/** Thrown by kvSet when a write would exceed a per-site storage quota. */
+export class KvQuotaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "KvQuotaError";
+  }
+}
+
+// Running-total meta keys: kept in sync by kvSet/kvRemove so quota checks stay
+// O(log n) instead of scanning every value on each write. Seeded once per site
+// in ensureDb (see below) from any pre-existing rows.
+const BYTES_COUNTER = "kv_bytes";
+const ROWS_COUNTER = "kv_rows";
 
 // Open SQLite connections, one cached per site. The database lives at
 // sites/<name>/data/db.sqlite — outside public/server/cron, so it is never
@@ -35,6 +49,20 @@ export function ensureDb(site: string): Database {
   db.exec(
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
   );
+  // Seed the storage-quota counters once (missing on fresh DBs and any created
+  // before quotas existed) from the current kv contents. Maintained by
+  // kvSet/kvRemove thereafter; byte lengths are UTF-8 (CAST … AS BLOB).
+  const seeded = db.query("SELECT 1 FROM meta WHERE key = ?").get(BYTES_COUNTER);
+  if (!seeded) {
+    const agg = db
+      .query(
+        "SELECT COUNT(*) AS rows, " +
+          "COALESCE(SUM(LENGTH(CAST(key AS BLOB)) + LENGTH(CAST(value AS BLOB))), 0) AS bytes FROM kv",
+      )
+      .get() as { rows: number; bytes: number };
+    db.query("INSERT INTO meta (key, value) VALUES (?, ?)").run(BYTES_COUNTER, String(agg.bytes));
+    db.query("INSERT INTO meta (key, value) VALUES (?, ?)").run(ROWS_COUNTER, String(agg.rows));
+  }
   dbCache.set(site, db);
   return db;
 }
@@ -113,28 +141,95 @@ export function kvGet(site: string, key: string): string | null {
   return row ? row.value : null;
 }
 
+/** UTF-8 byte length — matches SQLite's LENGTH(CAST(x AS BLOB)). */
+function byteLen(s: string): number {
+  return Buffer.byteLength(s, "utf8");
+}
+
+/** Current value of a numeric meta counter (0 if absent/corrupt). */
+function counterGet(site: string, key: string): number {
+  const raw = metaGet(site, key);
+  const n = raw === null ? 0 : Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Throw KvQuotaError if writing (key, value) would push the site past a storage
+ * cap; otherwise return the projected byte/row totals for the caller to persist.
+ * Uses the running counters + a single indexed lookup for the key being written,
+ * so it never scans the table.
+ */
+function enforceQuota(
+  db: Database,
+  site: string,
+  key: string,
+  value: string,
+): { projBytes: number; projRows: number } {
+  const q = kvQuota();
+  const row = db
+    .query("SELECT LENGTH(CAST(value AS BLOB)) AS vlen FROM kv WHERE key = ?")
+    .get(key) as { vlen: number } | null;
+  const isNew = row === null;
+  const oldSize = isNew ? 0 : byteLen(key) + row.vlen;
+  const newSize = byteLen(key) + byteLen(value);
+
+  const projBytes = counterGet(site, BYTES_COUNTER) - oldSize + newSize;
+  const projRows = counterGet(site, ROWS_COUNTER) + (isNew ? 1 : 0);
+
+  if (projBytes > q.bytes) {
+    throw new KvQuotaError(`site storage limit exceeded (${q.bytes} bytes)`);
+  }
+  if (isNew && projRows > q.rows) {
+    throw new KvQuotaError(`site key limit exceeded (${q.rows} keys)`);
+  }
+  // Per-user cap on the reserved user:<id>:* namespace (only new keys grow it).
+  if (isNew) {
+    const m = /^(user:[^:]+:)/.exec(key);
+    if (m) {
+      const prefix = m[1]!.replace(/[%_\\]/g, "\\$&") + "%"; // escape LIKE metachars
+      const { n } = db
+        .query("SELECT COUNT(*) AS n FROM kv WHERE key LIKE ? ESCAPE '\\'")
+        .get(prefix) as { n: number };
+      if (n >= q.userKeys) {
+        throw new KvQuotaError(`per-user key limit exceeded (${q.userKeys} keys)`);
+      }
+    }
+  }
+  return { projBytes, projRows };
+}
+
 /**
  * Store `value` (opaque text) under `key` and notify open pages. Pass `cls` to
  * (re)classify the key; omit it to write the value while preserving an existing
  * key's class (new keys default to "readwrite"). Private keys are never
- * broadcast — their values stay on the backend.
+ * broadcast — their values stay on the backend. Throws KvQuotaError if the write
+ * would exceed a per-site storage quota (see enforceQuota).
  */
 export function kvSet(site: string, key: string, value: string, cls?: KvClass): void {
   if (cls && !KV_CLASSES.includes(cls)) throw new Error(`invalid kv class: ${cls}`);
   const db = ensureDb(site);
-  if (cls) {
-    db.query(
-      "INSERT INTO kv (key, value, updated_at, class) VALUES (?, ?, ?, ?) " +
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, class = excluded.class",
-    ).run(key, value, Date.now(), cls);
-  } else {
-    // No class given: a new row defaults to "readwrite"; an existing row keeps
-    // its class (ON CONFLICT doesn't touch the class column).
-    db.query(
-      "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-    ).run(key, value, Date.now());
-  }
+  const { projBytes, projRows } = enforceQuota(db, site, key, value);
+
+  // Write the row and update the storage counters atomically, so a crash can't
+  // leave the counters out of step with the table.
+  db.transaction(() => {
+    if (cls) {
+      db.query(
+        "INSERT INTO kv (key, value, updated_at, class) VALUES (?, ?, ?, ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, class = excluded.class",
+      ).run(key, value, Date.now(), cls);
+    } else {
+      // No class given: a new row defaults to "readwrite"; an existing row keeps
+      // its class (ON CONFLICT doesn't touch the class column).
+      db.query(
+        "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+      ).run(key, value, Date.now());
+    }
+    metaSet(site, BYTES_COUNTER, String(projBytes));
+    metaSet(site, ROWS_COUNTER, String(projRows));
+  })();
+
   if ((cls ?? kvClass(site, key)) === "private") return; // value never leaves the backend
   // Values are JSON from the writer; fall back to the raw text if it isn't valid.
   let parsed: unknown;
@@ -154,8 +249,21 @@ export function kvSetClass(site: string, key: string, cls: KvClass): void {
 
 /** Remove `key` and notify open pages (private keys are never broadcast). */
 export function kvRemove(site: string, key: string): void {
+  const db = ensureDb(site);
   const wasPrivate = kvClass(site, key) === "private";
-  ensureDb(site).query("DELETE FROM kv WHERE key = ?").run(key);
+  const row = db
+    .query("SELECT LENGTH(CAST(value AS BLOB)) AS vlen FROM kv WHERE key = ?")
+    .get(key) as { vlen: number } | null;
+
+  db.transaction(() => {
+    db.query("DELETE FROM kv WHERE key = ?").run(key);
+    if (row) {
+      // Free the row's bytes/count from the running quota counters.
+      metaSet(site, BYTES_COUNTER, String(Math.max(0, counterGet(site, BYTES_COUNTER) - (byteLen(key) + row.vlen))));
+      metaSet(site, ROWS_COUNTER, String(Math.max(0, counterGet(site, ROWS_COUNTER) - 1)));
+    }
+  })();
+
   if (wasPrivate) return;
   broadcastKv(site, key, { key, action: "delete" });
 }
@@ -243,7 +351,12 @@ export async function handleKv(req: Request, site: string, key: string | null): 
     if (cls === "readonly") return json({ error: "read-only key" }, 403);
     const body = await readLimitedBody(req, MAX_KV_VALUE_BYTES);
     if (body instanceof Response) return body;
-    kvSet(site, key, body);
+    try {
+      kvSet(site, key, body);
+    } catch (e) {
+      if (e instanceof KvQuotaError) return json({ error: "storage quota exceeded" }, 507);
+      throw e;
+    }
     return json({ ok: true });
   }
   if (req.method === "DELETE") {

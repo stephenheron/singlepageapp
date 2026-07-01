@@ -9,26 +9,13 @@ A running list of things we want to improve. Each entry notes how it works today
 
 The isolation primitives are solid (per-context heap/stack/deadline in
 `sandbox.ts`, SSRF + 5 MB response cap on `ctx.fetch`, hashed deploy keys, signed
-identity, and now inbound body-size caps — see Recently shipped). The gap is
-uniformly **resource exhaustion by unauthenticated visitors on a shared host**:
-disk and memory are shared across every tenant, so one site — or one visitor —
-degrading the box hurts all of them. The two below close the remaining paths
-where a single anonymous request can do that.
+identity, inbound body-size caps, and now per-site storage quotas — see Recently
+shipped). The gap that remains is **request-rate exhaustion by unauthenticated
+visitors on a shared host**: CPU/memory are shared across every tenant, so one
+visitor spraying expensive routes degrades the box for all of them. The item
+below closes that path.
 
-### 1. Per-site storage quota
-
-`kvSet` (`kv.ts:103`) caps nothing — value size, key count, or total DB bytes.
-Disk is shared across all tenants, so one site filling it is a cross-tenant DoS.
-Worse, identity minting is free and unlimited: `resolveIdentity`
-(`identity.ts:123`) mints a fresh UUID on *every cookieless request*, and each id
-can write unlimited `private` `user:*` keys via `/__me/kv` with no quota (logs are
-retention-capped at `kv.ts:162`, but kv and `user:*` are not).
-
-Leaning toward: a per-site byte/row budget enforced in `kvSet`, plus a per-user
-key budget on the `user:*` path so unbounded anonymous identities can't grow the
-DB without limit.
-
-### 2. Rate limiting
+### 1. Rate limiting
 
 No rate limiting exists anywhere. An anonymous visitor can hammer `/__fn/*` (each
 request drives a QuickJS run with a 60 s budget) or spray `/__kv` / `/__me/kv`
@@ -73,11 +60,17 @@ Leaning toward: a per-site queue — `ctx.queue.enqueue(job, payload)` from a se
 function, with workers running the same `cron/`-style sandboxed handlers, plus
 retries with backoff and a dead-letter view. Reuses the existing sandbox + per-site
 SQLite (`kv.ts`) for durable job state; needs a concurrency cap that respects the
-global sandbox budget (see abuse-limits #2, rate limiting). Pairs naturally with the AI primitive
+global sandbox budget (see abuse-limits #1, rate limiting). Pairs naturally with the AI primitive
 (offload slow generations) and any future email helper (magic links, notifications).
 
 <!--
 Recently shipped:
+- Per-site storage quota: `kvSet` enforces per-site byte + key caps and a per-user
+  `user:<id>:*` key cap (`kvQuota()` in config.ts, env-overridable), throwing
+  `KvQuotaError` → 507 at the `/__kv` and `/__me/kv` boundaries. Byte/row totals
+  are kept as running counters in the `meta` table (seeded once in `ensureDb`) so
+  writes stay O(log n) instead of scanning every value. See config.ts, kv.ts,
+  identity.ts, quota.test.ts.
 - Inbound body-size caps: a global `maxRequestBodySize` on `Bun.serve`
   (`MAX_REQUEST_BODY_BYTES`, env-overridable) as a host-memory backstop, plus a
   256 KB `MAX_KV_VALUE_BYTES` cap on `/__kv` and `/__me/kv` PUTs via
