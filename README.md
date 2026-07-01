@@ -24,6 +24,13 @@ bun install
 SINGLEPAGE_APP_TOKEN=dev-secret bun start
 ```
 
+During development, use `bun dev` instead of `bun start` to auto-restart the server
+on file changes:
+
+```bash
+SINGLEPAGE_APP_TOKEN=dev-secret bun dev
+```
+
 `SINGLEPAGE_APP_TOKEN` is the **admin token** (required — the server refuses to start
 without it). It authorizes site creation and deploy-key rotation, nothing else.
 
@@ -188,6 +195,7 @@ Bun auto-loads `.env`, so these can live in a local `.env` file.
 | Script | Command |
 | --- | --- |
 | `bun start` | Run the server (`src/index.ts`). |
+| `bun dev` | Run the server with auto-restart on file changes (`bun --watch`). |
 | `bun run build:cli` | Compile the `singlepage` CLI to a standalone binary. |
 | `bun test` | Run the test suite. |
 

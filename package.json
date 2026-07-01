@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
     "build:cli": "bun build ./src/cli.ts --compile --outfile singlepage"
   },
   "devDependencies": {
