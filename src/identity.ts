@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHmac, createHash, timingSafeEqual, randomUUID } from "node:crypto";
-import { SITES_DIR, json } from "./config.ts";
-import { kvGet, kvSet, kvRemove, kvKeys } from "./kv.ts";
+import { SITES_DIR, json, MAX_KV_VALUE_BYTES } from "./config.ts";
+import { kvGet, kvSet, kvRemove, kvKeys, readLimitedBody } from "./kv.ts";
 
 /**
  * Anonymous end-user identity. Every visitor gets a stable, *unforgeable* id with
@@ -184,8 +184,10 @@ export async function handleMe(
       return new Response(value, { headers: { "content-type": "application/json" } });
     }
     if (req.method === "PUT") {
+      const body = await readLimitedBody(req, MAX_KV_VALUE_BYTES);
+      if (body instanceof Response) return body;
       // Stored "private": per-user values never broadcast and never leak over /__kv.
-      kvSet(site, fullKey, await req.text(), "private");
+      kvSet(site, fullKey, body, "private");
       return json({ ok: true });
     }
     if (req.method === "DELETE") {

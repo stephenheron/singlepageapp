@@ -1,4 +1,4 @@
-import { PORT, BASE_DOMAIN, SITES_DIR } from "./config.ts";
+import { PORT, BASE_DOMAIN, SITES_DIR, MAX_REQUEST_BODY_BYTES } from "./config.ts";
 import {
   EVENTS_PATH,
   addClient,
@@ -28,6 +28,8 @@ import { startCron } from "./cron.ts";
  */
 const server = Bun.serve<WsData>({
   port: PORT,
+  // Host-memory backstop: reject oversized bodies before any handler buffers them.
+  maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
   async fetch(req, server) {
     const url = new URL(req.url);
 

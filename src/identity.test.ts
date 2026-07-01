@@ -1,7 +1,7 @@
 import { test, expect, afterAll } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { SITES_DIR } from "./config.ts";
+import { SITES_DIR, MAX_KV_VALUE_BYTES } from "./config.ts";
 import { ensureDb, kvClass, kvGet, kvVisibleKeys, handleKv } from "./kv.ts";
 
 // identity derives its HMAC secret from the admin token; set it before importing.
@@ -112,6 +112,19 @@ test("per-user kv round-trips and is stored private under the user namespace", a
   );
   expect(del.status).toBe(200);
   expect(kvGet(SITE, `user:${id}:cart`)).toBeNull();
+});
+
+test("per-user kv PUT rejects a value over the size cap and stores nothing", async () => {
+  const { id } = mint(SITE);
+  const tooBig = '"' + "x".repeat(MAX_KV_VALUE_BYTES) + '"'; // > MAX bytes
+  const put = await handleMe(
+    new Request("http://x.local/__me/kv/big", { method: "PUT", body: tooBig }),
+    SITE,
+    id,
+    "/__me/kv/big",
+  );
+  expect(put.status).toBe(413);
+  expect(kvGet(SITE, `user:${id}:big`)).toBeNull(); // nothing written
 });
 
 test("one visitor cannot read another visitor's per-user data", async () => {

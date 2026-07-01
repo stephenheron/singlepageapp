@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
 import { Database } from "bun:sqlite";
-import { SITES_DIR, json } from "./config.ts";
+import { SITES_DIR, json, MAX_KV_VALUE_BYTES } from "./config.ts";
 import { broadcast, broadcastKv } from "./events.ts";
 
 // Open SQLite connections, one cached per site. The database lives at
@@ -59,6 +59,25 @@ export function metaSet(site: string, key: string, value: string): void {
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .run(key, value);
+}
+
+/**
+ * Read a request body, rejecting anything over `limit` bytes. Checks the
+ * declared Content-Length first (reject before buffering when the header is
+ * present and honest), then the actual UTF-8 byte length as the source of truth
+ * (handles chunked, absent, or lying headers). Returns the body text, or a 413
+ * Response the caller should return as-is.
+ */
+export async function readLimitedBody(req: Request, limit: number): Promise<string | Response> {
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    return json({ error: "value too large" }, 413);
+  }
+  const text = await req.text();
+  if (Buffer.byteLength(text, "utf8") > limit) {
+    return json({ error: "value too large" }, 413);
+  }
+  return text;
 }
 
 // --- KV helpers --------------------------------------------------------------
@@ -222,7 +241,9 @@ export async function handleKv(req: Request, site: string, key: string | null): 
   }
   if (req.method === "PUT") {
     if (cls === "readonly") return json({ error: "read-only key" }, 403);
-    kvSet(site, key, await req.text());
+    const body = await readLimitedBody(req, MAX_KV_VALUE_BYTES);
+    if (body instanceof Response) return body;
+    kvSet(site, key, body);
     return json({ ok: true });
   }
   if (req.method === "DELETE") {

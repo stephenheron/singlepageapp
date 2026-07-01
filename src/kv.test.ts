@@ -3,7 +3,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
-import { SITES_DIR } from "./config.ts";
+import { SITES_DIR, MAX_KV_VALUE_BYTES } from "./config.ts";
 import {
   ensureDb,
   kvGet,
@@ -171,4 +171,26 @@ test("kvSetClass reclassifies an existing key", async () => {
 
 test("kvSet rejects an invalid class", () => {
   expect(() => kvSet(SITE, "bad", '"v"', "nope" as any)).toThrow();
+});
+
+test("PUT rejects a value over the size cap and does not store it", async () => {
+  const tooBig = '"' + "x".repeat(MAX_KV_VALUE_BYTES) + '"'; // > MAX bytes
+  const put = await handleKv(
+    new Request("http://x/__kv/big", { method: "PUT", body: tooBig }),
+    SITE,
+    "big",
+  );
+  expect(put.status).toBe(413);
+  expect(kvGet(SITE, "big")).toBeNull(); // nothing written
+});
+
+test("PUT accepts a value at the size cap", async () => {
+  const atLimit = "x".repeat(MAX_KV_VALUE_BYTES); // exactly MAX bytes
+  const put = await handleKv(
+    new Request("http://x/__kv/ok", { method: "PUT", body: atLimit }),
+    SITE,
+    "ok",
+  );
+  expect(put.status).toBe(200);
+  expect(kvGet(SITE, "ok")).toBe(atLimit);
 });
