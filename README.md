@@ -67,6 +67,7 @@ live-reload (CSS hot-swaps without a full reload).
 | `singlepage init` | Create a site (admin token), scaffold `public/ server/ cron/` + a gitignored `.env`, save config + credentials, and install the agent guide (`SKILL.md` + `AGENTS.md`). |
 | `singlepage watch` | Initial upload, then watch `public/ server/ cron/` + `singlepage.json` + `.env` and sync changes (deploy key). |
 | `singlepage rotate-key` | Issue a new deploy key for the site; the old one stops working. Also how a pre-deploy-key site gets its first key. |
+| `singlepage regen-docs` | Re-render the agent guide (`SKILL.md` + `AGENTS.md`) from the current binary's template, using the existing project's config. Run after upgrading the CLI so a project scaffolded by an older binary picks up template changes. |
 
 ## Architecture
 

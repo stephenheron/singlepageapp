@@ -131,7 +131,7 @@ const DEBOUNCE_MS = 150;   // collapse a burst of fs events into one reconcile
 const RECONCILE_MS = 2000; // periodic safety-net rescan
 const MAX_CONCURRENT = 8;
 
-type Config = { endpoint: string; site: string };
+type Config = { endpoint: string; site: string; url?: string };
 
 // --- init ------------------------------------------------------------------
 
@@ -185,7 +185,10 @@ async function init() {
   }
 
   const site = (await res.json()) as { name: string; url: string; deployKey: string };
-  const config = { endpoint, site: site.name, cron: {} as Record<string, string> };
+  // Persist `url` too: it's the site's public address, used to render the agent
+  // guide's header. Storing it lets `regen-docs` rebuild the guide later without
+  // re-contacting the server.
+  const config = { endpoint, site: site.name, url: site.url, cron: {} as Record<string, string> };
   await Bun.write(CONFIG, JSON.stringify(config, null, 2) + "\n");
   // Persist both secrets locally (gitignored, never synced).
   await saveCreds({ adminToken, deployKey: site.deployKey });
@@ -262,7 +265,7 @@ async function rotateKey() {
 // --- shared helpers ---------------------------------------------------------
 
 async function loadConfig(): Promise<Config> {
-  let cfg: { endpoint?: string; site?: string };
+  let cfg: { endpoint?: string; site?: string; url?: string };
   try {
     cfg = await Bun.file(CONFIG).json();
   } catch {
@@ -273,7 +276,30 @@ async function loadConfig(): Promise<Config> {
     console.error(`${CONFIG} is missing "endpoint" or "site". Run \`singlepage init\`.`);
     process.exit(1);
   }
-  return { endpoint: String(cfg.endpoint).replace(/\/+$/, ""), site: String(cfg.site) };
+  return {
+    endpoint: String(cfg.endpoint).replace(/\/+$/, ""),
+    site: String(cfg.site),
+    // `url` was added later; older configs won't have it (see regen-docs fallback).
+    ...(cfg.url ? { url: String(cfg.url) } : {}),
+  };
+}
+
+// --- regen-docs ------------------------------------------------------------
+
+// Re-render the agent guide (Claude SKILL.md + the AGENTS.md block) from the
+// current binary's embedded template, using the existing project's config. No
+// server call, no credentials, no new site — just the local docs. Run it after
+// upgrading the CLI so a project scaffolded by an older binary picks up template
+// changes (e.g. newly documented features).
+async function regenDocs() {
+  const cfg = await loadConfig();
+  // `url` is only used in the guide's header line and wasn't persisted by older
+  // `init`s; fall back to the endpoint so pre-existing projects still regenerate.
+  const url = cfg.url ?? cfg.endpoint;
+  await writeAgentDocs({ site: cfg.site, url, endpoint: cfg.endpoint });
+  console.log(`✓ Regenerated agent guide for "${cfg.site}"`);
+  console.log(`  Skill:  ./${SKILL_FILE}`);
+  console.log(`  Agents: ./${AGENTS_FILE}`);
 }
 
 /** Bounds the number of concurrent transfers in flight. */
@@ -520,8 +546,10 @@ if (import.meta.main) {
     await watch();
   } else if (cmd === "rotate-key") {
     await rotateKey();
+  } else if (cmd === "regen-docs") {
+    await regenDocs();
   } else {
-    console.log("Usage: singlepage <init|watch|rotate-key>");
+    console.log("Usage: singlepage <init|watch|rotate-key|regen-docs>");
     process.exit(cmd ? 1 : 0);
   }
 }
