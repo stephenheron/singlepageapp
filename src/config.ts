@@ -58,6 +58,22 @@ export function rateLimits(): Record<"fn" | "write", { rps: number; burst: numbe
   };
 }
 
+/**
+ * The scheme + authority the client actually reached us on, for building
+ * absolute URLs (a site's public address, sibling-site links). Behind a proxy
+ * the browser hits us on 443/https with no explicit port; the Host header
+ * carries the correct authority (with a port only when one is really in use) and
+ * x-forwarded-proto (set by the front proxy) tells us the real scheme. Never
+ * derive these from the internal listen PORT — that leaks :3000 into public URLs.
+ */
+export function requestOrigin(req: Request): { scheme: string; authority: string } {
+  const scheme =
+    req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() ||
+    new URL(req.url).protocol.replace(/:$/, "");
+  const authority = req.headers.get("host") ?? `${BASE_DOMAIN}:${PORT}`;
+  return { scheme, authority };
+}
+
 /** Build a JSON Response. */
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {

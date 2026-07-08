@@ -1,7 +1,7 @@
 import { join, resolve, sep } from "node:path";
 import { readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { SITES_DIR, BASE_DOMAIN, PORT } from "./config.ts";
+import { SITES_DIR, BASE_DOMAIN, requestOrigin } from "./config.ts";
 import { metaGet } from "./kv.ts";
 
 // Shared client script injected into every served HTML page.
@@ -122,14 +122,8 @@ async function siteTitle(name: string): Promise<string | null> {
 /** Apex landing page: a card grid of the sites currently on disk (read live). */
 export async function apexResponse(req: Request): Promise<Response> {
   // Build sibling-site URLs from the request's own origin as the browser sees
-  // it, not from the internal listen port. Behind a proxy the browser reaches
-  // us on 443/https with no explicit port; the Host header already carries the
-  // correct authority (with a port only when one is actually in use), and
-  // x-forwarded-proto (set by the front proxy) tells us the real scheme.
-  const scheme =
-    req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() ||
-    new URL(req.url).protocol.replace(/:$/, "");
-  const apexAuthority = req.headers.get("host") ?? `${BASE_DOMAIN}:${PORT}`;
+  // it, not from the internal listen port.
+  const { scheme, authority: apexAuthority } = requestOrigin(req);
 
   let entries: string[] = [];
   try {

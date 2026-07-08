@@ -55,6 +55,26 @@ test("site creation requires the admin token", async () => {
   expect(deployKey.startsWith("sp_")).toBe(true);
 });
 
+test("created site url uses the request's scheme/authority, not the internal port", async () => {
+  // Simulate the front proxy: browser reached us on https at the apex domain
+  // with no explicit port. The returned url must reflect that, not :3000.
+  const u = new URL("http://internal-host:3000/api/sites");
+  const req = new Request(u.href, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${ADMIN}`,
+      "content-type": "application/json",
+      host: "singlepageapp.co",
+      "x-forwarded-proto": "https",
+    },
+    body: JSON.stringify({ name: "auth-proxied" }),
+  });
+  const res = await handleApi(req, u);
+  const data = (await res.json()) as { name: string; url: string };
+  created.push(data.name);
+  expect(data.url).toBe("https://auth-proxied.singlepageapp.co/");
+});
+
 test("deploy key is stored hashed and never in the client-readable kv store", async () => {
   const { name, deployKey } = await createSite("auth-hashed");
   const stored = metaGet(name, "deploy_key_hash");

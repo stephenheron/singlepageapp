@@ -2,7 +2,7 @@ import { join, resolve, sep } from "node:path";
 import { readdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { timingSafeEqual, createHash, randomBytes } from "node:crypto";
-import { SITES_DIR, BASE_DOMAIN, PORT, json } from "./config.ts";
+import { SITES_DIR, json, requestOrigin } from "./config.ts";
 import { notifyReloadForPath } from "./events.ts";
 import { ensureDb, metaGet, metaSet } from "./kv.ts";
 import { invalidate } from "./sandbox.ts";
@@ -171,8 +171,12 @@ export async function handleApi(req: Request, url: URL): Promise<Response> {
     ensureDb(name); // provision the site's SQLite database + kv table
     const deployKey = setSiteDeployKey(name);
 
+    // Build the site's public URL from the origin the client actually reached
+    // us on, not the internal listen port — otherwise :3000 leaks into the URL
+    // that `init` persists to singlepage.json and the generated agent guide.
+    const { scheme, authority } = requestOrigin(req);
     return json(
-      { name, url: `http://${name}.${BASE_DOMAIN}:${PORT}/`, deployKey },
+      { name, url: `${scheme}://${name}.${authority}/`, deployKey },
       201,
     );
   }
